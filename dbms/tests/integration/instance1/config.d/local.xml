@@ -1,0 +1,27 @@
+<yandex>
+    <listen_host>::</listen_host>
+
+    <logger>
+        <log>/instance/clickhouse-server.log</log>
+        <errorlog>/instance/clickhouse-server.err.log</errorlog>
+    </logger>
+
+    <path>/instance/database/</path>
+
+    <tmp_path>/instance/database/tmp/</tmp_path>
+    
+    <zookeeper>
+	    <node index="1">
+		    <host>zoo1</host>
+		    <port>2181</port>
+	    </node>
+	    <node index="2">
+		    <host>zoo2</host>
+		    <port>2181</port>
+	    </node>
+	    <node index="3">
+		    <host>zoo3</host>
+		    <port>2181</port>
+	    </node>
+	</zookeeper>
+</yandex>
