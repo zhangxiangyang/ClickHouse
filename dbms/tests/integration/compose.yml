@@ -3,8 +3,6 @@ services:
     zoo1:
         image: zookeeper
         restart: always
-        ports:
-            - 2181:2181
         environment:
             ZOO_MY_ID: 1
             ZOO_SERVERS: server.1=zoo1:2888:3888 server.2=zoo2:2888:3888 server.3=zoo3:2888:3888
@@ -12,8 +10,6 @@ services:
     zoo2:
         image: zookeeper
         restart: always
-        ports:
-            - 2182:2181
         environment:
             ZOO_MY_ID: 2
             ZOO_SERVERS: server.1=zoo1:2888:3888 server.2=zoo2:2888:3888 server.3=zoo3:2888:3888
@@ -21,8 +17,6 @@ services:
     zoo3:
         image: zookeeper
         restart: always
-        ports:
-            - 2183:2181
         environment:
             ZOO_MY_ID: 3
             ZOO_SERVERS: server.1=zoo1:2888:3888 server.2=zoo2:2888:3888 server.3=zoo3:2888:3888
@@ -30,10 +24,8 @@ services:
 
     clickhouse1:
         image: ubuntu:14.04
-        ports:
-            - 23001:9000
         volumes:
-            - ../../../build/:/clickhouse/
+            - ../../../build/:/clickhouse/:ro
             - ./instance1/:/instance/
         command:
             - /clickhouse/dbms/src/Server/clickhouse
@@ -43,10 +35,8 @@ services:
         
     clickhouse2:
         image: ubuntu:14.04
-        ports:
-            - 23002:9000
         volumes:
-            - ../../../build/:/clickhouse/
+            - ../../../build/:/clickhouse/:ro
             - ./instance2/:/instance/
         command:
             - /clickhouse/dbms/src/Server/clickhouse
