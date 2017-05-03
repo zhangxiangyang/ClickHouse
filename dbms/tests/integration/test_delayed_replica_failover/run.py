@@ -1,7 +1,8 @@
 from ..helpers import ClickHouseCluster
 
 cluster = ClickHouseCluster(__file__) \
-    .add_instance('instance', ['configs/graphite_rollup.xml'])
+    .add_instance('instance1', [], zookeeper_required=True) \
+    .add_instance('instance2', [], zookeeper_required=True) \
 
 def setup_module():
     print "Setting up cluster..."
