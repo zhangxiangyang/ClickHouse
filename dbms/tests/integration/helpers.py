@@ -15,7 +15,7 @@ services:
         image: ubuntu:14.04
         user: '{uid}'
         volumes:
-            - {bin_dir}:/usr/bin/:ro
+            - {binary_path}:/usr/bin/clickhouse:ro
             - {configs_dir}:/etc/clickhouse-server/
             - {db_dir}:/var/lib/clickhouse/
             - {logs_dir}:/var/log/clickhouse-server/
@@ -96,7 +96,7 @@ class ClickHouseInstance:
             docker_compose.write(DOCKER_COMPOSE_TEMPLATE.format(
                 name=self.name,
                 uid=os.getuid(),
-                bin_dir=p.join(self.build_dir, 'dbms/src/Server/'),
+                binary_path=p.join(self.build_dir, 'dbms/src/Server/clickhouse'),
                 configs_dir=configs_dir,
                 config_d_dir=config_d_dir,
                 db_dir=db_dir,
