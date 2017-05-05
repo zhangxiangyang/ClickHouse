@@ -6,6 +6,7 @@ import shutil
 
 import docker
 
+from .client import Client
 
 BASE_TESTS_DIR = p.dirname(__file__)
 
@@ -146,8 +147,11 @@ class ClickHouseCluster:
         docker_client = docker.from_env()
         for instance in self.instances.values():
             instance.docker_id = self.project_name + '_' + instance.name + '_1'
+
             container = docker_client.containers.get(instance.docker_id)
             instance.ip_address = container.attrs['NetworkSettings']['Networks'].values()[0]['IPAddress']
+
+            instance.client = Client(instance.ip_address)
 
     def down(self):
         subprocess.check_call(self.base_cmd + ['down', '--volumes'])
@@ -156,3 +160,4 @@ class ClickHouseCluster:
         for instance in self.instances.values():
             instance.docker_id = None
             instance.ip_address = None
+            instance.client = None
