@@ -7,13 +7,51 @@ import docker
 from .cluster import BASE_TESTS_DIR
 
 
+class PartitionManager:
+    def __init__(self):
+        self._iptables_rules = []
+
+    def isolate_instance_from_zk(self, instance, action='DROP'):
+        self._check_instance(instance)
+
+        self._add_rule({'source': instance.ip_address, 'destination_port': 2181, 'action': action})
+        self._add_rule({'destination': instance.ip_address, 'source_port': 2181, 'action': action})
+
+    def partition_instances(self, left, right, action='DROP'):
+        self._check_instance(left)
+        self._check_instance(right)
+
+        self._add_rule({'source': left.ip_address, 'destination': right.ip_address, 'action': action})
+        self._add_rule({'source': right.ip_address, 'destination': left.ip_address, 'action': action})
+
+    def heal_all(self):
+        while self._iptables_rules:
+            rule = self._iptables_rules.pop()
+            _NetworkManager.get().delete_iptables_rule(**rule)
+
+    @staticmethod
+    def _check_instance(instance):
+        if instance.ip_address is None:
+            raise Exception('Instance + ' + instance.name + ' is not launched!')
+
+    def _add_rule(self, rule):
+        _NetworkManager.get().add_iptables_rule(**rule)
+        self._iptables_rules.append(rule)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.heal_all()
+
+
 # We need to call iptables to create partitions, but we want to avoid sudo.
 # The way to circumvent this restriction is to run iptables in a container with network=host.
 # The container is long-running and periodically renewed - this is an optimization to avoid the overhead
 # of container creation on each call.
 # Source of the idea: https://github.com/worstcase/blockade/blob/master/blockade/host.py
 
-class NetworkManager:
+class _NetworkManager:
     _instance = None
 
     @classmethod
@@ -36,7 +74,7 @@ class NetworkManager:
     def _iptables_cmd_suffix(
             source=None, destination=None,
             source_port=None, destination_port=None,
-            target=None):
+            action=None):
         ret = []
         if source is not None:
             ret.extend(['-s', source])
@@ -46,8 +84,8 @@ class NetworkManager:
             ret.extend(['-p', 'tcp', '--sport', str(source_port)])
         if destination_port is not None:
             ret.extend(['-p', 'tcp', '--dport', str(destination_port)])
-        if target is not None:
-            ret.extend(['-j', target])
+        if action is not None:
+            ret.extend(['-j', action])
         return ret
 
 
