@@ -1,4 +1,4 @@
-from ..helpers import ClickHouseCluster
+from ..cluster import ClickHouseCluster
 
 cluster = ClickHouseCluster(__file__) \
     .add_instance('instance1', [], zookeeper_required=True) \
