@@ -1,16 +1,19 @@
-from ..cluster import ClickHouseCluster
+import unittest
+
+from helpers.cluster import ClickHouseCluster
 
 cluster = ClickHouseCluster(__file__) \
     .add_instance('instance1', [], zookeeper_required=True) \
     .add_instance('instance2', [], zookeeper_required=True) \
 
-def setup_module():
+def setUpModule():
     print "Setting up cluster..."
     cluster.up()
 
-def teardown_module():
+def tearDownModule():
     print "Shutting down cluster..."
     cluster.down()
 
-def test():
-    pass
+class Test(unittest.TestCase):
+    def test(self):
+        pass

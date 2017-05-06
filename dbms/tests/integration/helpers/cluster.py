@@ -40,8 +40,8 @@ class ClickHouseInstance:
     def __init__(self, base_path, name, custom_configs, zookeeper_required=False):
         self.name = name
 
-        self.src_dir = p.abspath(p.join(BASE_TESTS_DIR, '../../../'))
-        self.build_dir = p.abspath(p.join(BASE_TESTS_DIR, '../../../build/'))
+        self.src_dir = p.abspath(p.join(BASE_TESTS_DIR, '../../../../'))
+        self.build_dir = p.abspath(p.join(BASE_TESTS_DIR, '../../../../build/'))
 
         self.custom_config_paths = [p.abspath(p.join(base_path, c)) for c in custom_configs]
 
