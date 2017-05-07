@@ -132,14 +132,14 @@ class ClickHouseCluster:
             self.with_zookeeper = True
             self.base_cmd.extend(['--file', p.join(BASE_TESTS_DIR, 'docker_compose_zookeeper.yml')])
 
-        return self
+        return instance
 
-    def up(self):
+    def up(self, destroy_dirs=True):
         if self.is_up:
             return
 
         for instance in self.instances.values():
-            instance.create_dir()
+            instance.create_dir(destroy_dir=destroy_dirs)
 
         subprocess.check_call(self.base_cmd + ['up', '-d'])
         self.is_up = True
