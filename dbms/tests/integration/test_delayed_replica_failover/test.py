@@ -41,14 +41,24 @@ class Test(unittest.TestCase):
                 "SELECT count() FROM distributed SETTINGS load_balancing='in_order'").strip(), '')
 
             self.assertEqual(
-                instance_with_dist_table.query(
-                    "SELECT count() FROM distributed SETTINGS"
-                    "    load_balancing='in_order', max_replica_delay_for_distributed_queries=1").strip(),
+                instance_with_dist_table.query('''
+SELECT count() FROM distributed SETTINGS
+    load_balancing='in_order',
+    max_replica_delay_for_distributed_queries=1
+''').strip(),
                 '1')
 
             pm.isolate_instance_from_zk(replica2)
 
             time.sleep(30) # allow pings to zookeeper to timeout
+
+            self.assertEqual(
+                instance_with_dist_table.query('''
+SELECT count() FROM distributed SETTINGS
+    load_balancing='in_order',
+    max_replica_delay_for_distributed_queries=1
+''').strip(),
+                '1')
 
             with self.assertRaises(Exception):
                 instance_with_dist_table.query('''
