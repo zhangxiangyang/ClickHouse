@@ -8,7 +8,7 @@ class Client:
         self.port = port
         self.command = command
 
-    def query(self, sql, timeout=None):
+    def query(self, sql, timeout=10.0):
         process = sp.Popen(
             [self.command, '--multiquery', '--host', self.host, '--port', str(self.port)],
             stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE)

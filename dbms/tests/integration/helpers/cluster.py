@@ -52,6 +52,10 @@ class ClickHouseInstance:
 
         self.docker_id = None
         self.ip_address = None
+        self.client = None
+
+    def query(self, sql):
+        return self.client.query(sql)
 
     def create_dir(self, destroy_dir=True):
         if destroy_dir:
