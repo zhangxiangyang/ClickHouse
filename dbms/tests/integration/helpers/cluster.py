@@ -37,7 +37,7 @@ MACROS_CONFIG_TEMPLATE = '''
 '''
 
 class ClickHouseInstance:
-    def __init__(self, base_path, name, custom_configs, zookeeper_required=False):
+    def __init__(self, base_path, name, custom_configs, with_zookeeper=False):
         self.name = name
 
         self.src_dir = p.abspath(p.join(BASE_TESTS_DIR, '../../../../'))
@@ -45,7 +45,7 @@ class ClickHouseInstance:
 
         self.custom_config_paths = [p.abspath(p.join(base_path, c)) for c in custom_configs]
 
-        self.zookeeper_required = zookeeper_required
+        self.with_zookeeper = with_zookeeper
 
         self.path = p.abspath(p.join(base_path, name))
         self.docker_compose_path = p.join(self.path, 'docker_compose.yml')
@@ -60,6 +60,8 @@ class ClickHouseInstance:
     def create_dir(self, destroy_dir=True):
         if destroy_dir:
             self.destroy_dir()
+        elif p.exists(self.path):
+            return
 
         os.mkdir(self.path)
 
@@ -77,7 +79,7 @@ class ClickHouseInstance:
         with open(p.join(config_d_dir, 'macros.xml'), 'w') as macros_config:
             macros_config.write(MACROS_CONFIG_TEMPLATE.format(name=self.name))
 
-        if self.zookeeper_required:
+        if self.with_zookeeper:
             shutil.copy(p.join(BASE_TESTS_DIR, 'zookeeper_config.xml'), config_d_dir)
 
         for path in self.custom_config_paths:
@@ -90,7 +92,7 @@ class ClickHouseInstance:
         os.mkdir(logs_dir)
 
         depends_on = '[]'
-        if self.zookeeper_required:
+        if self.with_zookeeper:
             depends_on = '["zoo1", "zoo2", "zoo3"]'
 
         with open(self.docker_compose_path, 'w') as docker_compose:
@@ -122,17 +124,17 @@ class ClickHouseCluster:
         self.with_zookeeper = False
         self.is_up = False
 
-    def add_instance(self, name, custom_configs, zookeeper_required=False):
+    def add_instance(self, name, custom_configs, with_zookeeper=False):
         if self.is_up:
             raise Exception('Can\'t add instance %s: cluster is already up!' % name)
 
         if name in self.instances:
             raise Exception('Can\'t add instance %s: there is already instance with the same name!' % name)
 
-        instance = ClickHouseInstance(self.base_dir, name, custom_configs, zookeeper_required)
+        instance = ClickHouseInstance(self.base_dir, name, custom_configs, with_zookeeper)
         self.instances[name] = instance
         self.base_cmd.extend(['--file', instance.docker_compose_path])
-        if zookeeper_required and not self.with_zookeeper:
+        if with_zookeeper and not self.with_zookeeper:
             self.with_zookeeper = True
             self.base_cmd.extend(['--file', p.join(BASE_TESTS_DIR, 'docker_compose_zookeeper.yml')])
 
@@ -158,6 +160,7 @@ class ClickHouseCluster:
             instance.client = Client(instance.ip_address)
 
     def down(self):
+        subprocess.check_call(self.base_cmd + ['kill'])
         subprocess.check_call(self.base_cmd + ['down', '--volumes'])
         self.is_up = False
 

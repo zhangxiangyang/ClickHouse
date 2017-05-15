@@ -7,12 +7,12 @@ from helpers.network import PartitionManager
 cluster = ClickHouseCluster(__file__)
 
 instance_with_dist_table = cluster.add_instance('instance_with_dist_table', ['remote_servers.xml'])
-replica1 = cluster.add_instance('replica1', ['remove_resharding.xml'], zookeeper_required=True)
-replica2 = cluster.add_instance('replica2', ['remove_resharding.xml'], zookeeper_required=True)
+replica1 = cluster.add_instance('replica1', [], with_zookeeper=True)
+replica2 = cluster.add_instance('replica2', [], with_zookeeper=True)
 
 def setUpModule():
     cluster.up()
-    time.sleep(1) # give zookeeper time to elect leader
+    time.sleep(1) # give clickhouse servers time to start up
     for replica in (replica1, replica2):
         replica.query(
             "CREATE TABLE replicated (d Date, x UInt32) ENGINE = "
@@ -50,7 +50,7 @@ SELECT count() FROM distributed SETTINGS
 
             pm.isolate_instance_from_zk(replica2)
 
-            time.sleep(30) # allow pings to zookeeper to timeout
+            time.sleep(2) # allow pings to zookeeper to timeout
 
             self.assertEqual(
                 instance_with_dist_table.query('''
@@ -64,6 +64,6 @@ SELECT count() FROM distributed SETTINGS
                 instance_with_dist_table.query('''
 SELECT count() FROM distributed SETTINGS
     load_balancing='in_order',
-    max_replica_delay_for_distributed_queries=10,
+    max_replica_delay_for_distributed_queries=1,
     fallback_to_stale_replicas_for_distributed_queries=0
 ''')
