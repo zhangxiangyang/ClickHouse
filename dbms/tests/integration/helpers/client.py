@@ -2,6 +2,7 @@ import errno
 import subprocess as sp
 from threading import Timer
 
+
 class Client:
     def __init__(self, host, port=9000, command='clickhouse-client'):
         self.host = host
@@ -37,3 +38,11 @@ class Client:
             raise Exception('Query failed! Client return code: {}, stderr: {}'.format(process.returncode, stderr))
 
         return stdout
+
+
+class TSV:
+    def __init__(self, contents):
+        self.lines = contents.readlines() if isinstance(contents, file) else contents.splitlines(True)
+
+    def __eq__(self, other):
+        return self.lines == other.lines

@@ -2,8 +2,10 @@ import os.path as p
 import unittest
 import time
 import datetime
+import difflib
 
 from helpers.cluster import ClickHouseCluster
+from helpers.client import TSV
 
 cluster = ClickHouseCluster(__file__)
 
@@ -18,11 +20,6 @@ def tearDownModule():
     cluster.down()
 
 
-def compare_with_reference(sql_file, reference_file):
-    current_dir = p.dirname(__file__)
-    with open(p.join(current_dir, sql_file)) as sql, open(p.join(current_dir, reference_file)) as reference:
-        assert instance.query(sql.read()) == reference.read()
-
 class Test(unittest.TestCase):
     def setUp(self):
         instance.query('''
@@ -32,8 +29,10 @@ CREATE TABLE test.graphite
     ENGINE = GraphiteMergeTree(date, (metric, timestamp), 8192, 'graphite_rollup');
 ''')
 
+
     def tearDown(self):
         instance.query('DROP TABLE test.graphite')
+
 
     def test1(self):
         timestamp = int(time.time())
@@ -88,12 +87,12 @@ FROM (SELECT timestamp,
 
         result2 = q('''
 INSERT INTO test.graphite
-SELECT 'one_min.x' AS metric,
-       toFloat64(number) AS value,
-       toUInt32(1111111111 + intDiv(number, 3)) AS timestamp,
-       toDate('2017-02-02') AS date, toUInt32(intDiv(number, 2)) AS updated
-FROM (SELECT * FROM system.numbers LIMIT 1000000)
-WHERE intDiv(timestamp, 600) * 600 = 1111444200;
+    SELECT 'one_min.x' AS metric,
+           toFloat64(number) AS value,
+           toUInt32(1111111111 + intDiv(number, 3)) AS timestamp,
+           toDate('2017-02-02') AS date, toUInt32(intDiv(number, 2)) AS updated
+    FROM (SELECT * FROM system.numbers LIMIT 1000000)
+    WHERE intDiv(timestamp, 600) * 600 = 1111444200;
 
 OPTIMIZE TABLE test.graphite PARTITION 201702 FINAL;
 
@@ -106,7 +105,53 @@ one_min.x	999634.9918367347	1111444200	2017-02-02	499999
 
 
     def test3(self):
-        compare_with_reference('test3.sql', 'test3.reference')
+        result = instance.query('''
+INSERT INTO test.graphite
+    SELECT 'one_min.x' AS metric,
+           toFloat64(number) AS value,
+           toUInt32(1111111111 - intDiv(number, 3)) AS timestamp,
+           toDate('2017-02-02') AS date,
+           toUInt32(100 - number) AS updated
+    FROM (SELECT * FROM system.numbers LIMIT 50);
+
+OPTIMIZE TABLE test.graphite PARTITION 201702 FINAL;
+
+SELECT * FROM test.graphite;
+''')
+
+        expected = '''\
+one_min.x	24	1111110600	2017-02-02	100
+'''
+
+        self.assertEqual(result, expected)
+
 
     def test4(self):
-        compare_with_reference('test4.sql', 'test4.reference')
+        result = instance.query('''
+INSERT INTO test.graphite
+    SELECT 'one_min.x' AS metric,
+           toFloat64(number) AS value,
+           toUInt32(1111111111 + intDiv(number, 3) * 600) AS timestamp,
+           toDate('2017-02-02') AS date, toUInt32(100 - number) AS updated
+    FROM (SELECT * FROM system.numbers LIMIT 50);
+
+OPTIMIZE TABLE test.graphite PARTITION 201702 FINAL;
+
+SELECT * FROM test.graphite;
+
+
+INSERT INTO test.graphite
+    SELECT 'one_min.y' AS metric,
+           toFloat64(number) AS value,
+           toUInt32(1111111111 + number * 600) AS timestamp,
+           toDate('2017-02-02') AS date,
+           toUInt32(100 - number) AS updated
+    FROM (SELECT * FROM system.numbers LIMIT 50);
+
+OPTIMIZE TABLE test.graphite PARTITION 201702 FINAL;
+
+SELECT * FROM test.graphite;
+''')
+
+        with open(p.join(p.dirname(__file__), 'test4.reference')) as reference:
+            assert TSV(result) == TSV(reference)
