@@ -10,9 +10,10 @@ instance_with_dist_table = cluster.add_instance('instance_with_dist_table', ['re
 replica1 = cluster.add_instance('replica1', [], with_zookeeper=True)
 replica2 = cluster.add_instance('replica2', [], with_zookeeper=True)
 
+
 def setUpModule():
     cluster.up()
-    time.sleep(1) # give clickhouse servers time to start up
+
     for replica in (replica1, replica2):
         replica.query(
             "CREATE TABLE replicated (d Date, x UInt32) ENGINE = "
@@ -22,8 +23,10 @@ def setUpModule():
         "CREATE TABLE distributed (d Date, x UInt32) ENGINE = "
         "Distributed('test_cluster', 'default', 'replicated')")
 
+
 def tearDownModule():
     cluster.down()
+
 
 class Test(unittest.TestCase):
     def test(self):

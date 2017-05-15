@@ -3,6 +3,9 @@ import os.path as p
 import re
 import subprocess
 import shutil
+import socket
+import time
+import errno
 
 import docker
 
@@ -54,8 +57,29 @@ class ClickHouseInstance:
         self.ip_address = None
         self.client = None
 
+
     def query(self, sql):
         return self.client.query(sql)
+
+
+    def wait_for_start(self, timeout=1.0):
+        deadline = time.time() + timeout
+        while True:
+            if time.time() >= deadline:
+                raise Exception("Timed out while waiting for instance {} with ip address {} to start".format(self.name, self.ip_address))
+
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.connect((self.ip_address, 9000))
+                return
+            except socket.error as e:
+                if e.errno == errno.ECONNREFUSED:
+                    time.sleep(0.1)
+                else:
+                    raise
+            finally:
+                sock.close()
+
 
     def create_dir(self, destroy_dir=True):
         if destroy_dir:
@@ -106,6 +130,7 @@ class ClickHouseInstance:
                 logs_dir=logs_dir,
                 depends_on=depends_on))
 
+
     def destroy_dir(self):
         if p.exists(self.path):
             shutil.rmtree(self.path)
@@ -124,6 +149,7 @@ class ClickHouseCluster:
         self.with_zookeeper = False
         self.is_up = False
 
+
     def add_instance(self, name, custom_configs, with_zookeeper=False):
         if self.is_up:
             raise Exception('Can\'t add instance %s: cluster is already up!' % name)
@@ -140,6 +166,7 @@ class ClickHouseCluster:
 
         return instance
 
+
     def up(self, destroy_dirs=True):
         if self.is_up:
             return
@@ -148,16 +175,24 @@ class ClickHouseCluster:
             instance.create_dir(destroy_dir=destroy_dirs)
 
         subprocess.check_call(self.base_cmd + ['up', '-d'])
+
+        try:
+            docker_client = docker.from_env()
+            for instance in self.instances.values():
+                instance.docker_id = self.project_name + '_' + instance.name + '_1'
+
+                container = docker_client.containers.get(instance.docker_id)
+                instance.ip_address = container.attrs['NetworkSettings']['Networks'].values()[0]['IPAddress']
+
+                instance.wait_for_start()
+
+                instance.client = Client(instance.ip_address)
+        except:
+            self.down()
+            raise
+
         self.is_up = True
 
-        docker_client = docker.from_env()
-        for instance in self.instances.values():
-            instance.docker_id = self.project_name + '_' + instance.name + '_1'
-
-            container = docker_client.containers.get(instance.docker_id)
-            instance.ip_address = container.attrs['NetworkSettings']['Networks'].values()[0]['IPAddress']
-
-            instance.client = Client(instance.ip_address)
 
     def down(self):
         subprocess.check_call(self.base_cmd + ['kill'])
