@@ -4,7 +4,7 @@ from threading import Timer
 
 
 class Client:
-    def __init__(self, host, port=9000, command='clickhouse-client'):
+    def __init__(self, host, port=9000, command='/usr/bin/clickhouse-client'):
         self.host = host
         self.port = port
         self.command = command

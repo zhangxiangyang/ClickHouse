@@ -40,15 +40,16 @@ MACROS_CONFIG_TEMPLATE = '''
 '''
 
 class ClickHouseInstance:
-    def __init__(self, base_path, name, custom_configs, with_zookeeper=False):
+    def __init__(
+            self, base_path, name, custom_configs, with_zookeeper,
+            base_configs_dir, server_bin_path):
+
         self.name = name
-
-        self.src_dir = p.abspath(p.join(BASE_TESTS_DIR, '../../../../'))
-        self.build_dir = p.abspath(p.join(BASE_TESTS_DIR, '../../../../build/'))
-
         self.custom_config_paths = [p.abspath(p.join(base_path, c)) for c in custom_configs]
-
         self.with_zookeeper = with_zookeeper
+
+        self.base_configs_dir = base_configs_dir
+        self.server_bin_path = server_bin_path
 
         self.path = p.abspath(p.join(base_path, name))
         self.docker_compose_path = p.join(self.path, 'docker_compose.yml')
@@ -92,8 +93,8 @@ class ClickHouseInstance:
         configs_dir = p.join(self.path, 'configs')
         os.mkdir(configs_dir)
 
-        shutil.copy(p.join(self.src_dir, 'dbms/src/Server/config.xml'), configs_dir)
-        shutil.copy(p.join(self.src_dir, 'dbms/src/Server/users.xml'), configs_dir)
+        shutil.copy(p.join(self.base_configs_dir, 'config.xml'), configs_dir)
+        shutil.copy(p.join(self.base_configs_dir, 'users.xml'), configs_dir)
 
         config_d_dir = p.join(configs_dir, 'config.d')
         os.mkdir(config_d_dir)
@@ -123,7 +124,7 @@ class ClickHouseInstance:
             docker_compose.write(DOCKER_COMPOSE_TEMPLATE.format(
                 name=self.name,
                 uid=os.getuid(),
-                binary_path=p.join(self.build_dir, 'dbms/src/Server/clickhouse'),
+                binary_path=self.server_bin_path,
                 configs_dir=configs_dir,
                 config_d_dir=config_d_dir,
                 db_dir=db_dir,
@@ -137,8 +138,12 @@ class ClickHouseInstance:
 
 
 class ClickHouseCluster:
-    def __init__(self, base_path):
+    def __init__(self, base_path, base_configs_dir=None, server_bin_path=None, client_bin_path=None):
         self.base_dir = p.dirname(base_path)
+
+        self.base_configs_dir = base_configs_dir or os.environ.get('CLICKHOUSE_TESTS_BASE_CONFIG_DIR', '/etc/clickhouse-server/')
+        self.server_bin_path = server_bin_path or os.environ.get('CLICKHOUSE_TESTS_SERVER_BIN_PATH', '/usr/bin/clickhouse')
+        self.client_bin_path = client_bin_path or os.environ.get('CLICKHOUSE_TESTS_CLIENT_BIN_PATH', '/usr/bin/clickhouse-client')
 
         self.project_name = os.getlogin() + p.basename(self.base_dir)
         # docker-compose removes everything non-alphanumeric from project names so we do it too.
@@ -157,7 +162,7 @@ class ClickHouseCluster:
         if name in self.instances:
             raise Exception('Can\'t add instance %s: there is already instance with the same name!' % name)
 
-        instance = ClickHouseInstance(self.base_dir, name, custom_configs, with_zookeeper)
+        instance = ClickHouseInstance(self.base_dir, name, custom_configs, with_zookeeper, self.base_configs_dir, self.server_bin_path)
         self.instances[name] = instance
         self.base_cmd.extend(['--file', instance.docker_compose_path])
         if with_zookeeper and not self.with_zookeeper:
@@ -186,7 +191,8 @@ class ClickHouseCluster:
 
                 instance.wait_for_start()
 
-                instance.client = Client(instance.ip_address)
+                instance.client = Client(instance.ip_address, command=self.client_bin_path)
+
         except:
             self.down()
             raise
