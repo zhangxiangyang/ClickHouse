@@ -62,7 +62,7 @@ class ClickHouseInstance:
         return self.client.query(sql)
 
 
-    def wait_for_start(self, timeout=1.0):
+    def wait_for_start(self, timeout=10.0):
         deadline = time.time() + timeout
         while True:
             if time.time() >= deadline:
