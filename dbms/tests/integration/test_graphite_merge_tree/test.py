@@ -12,15 +12,17 @@ instance = cluster.add_instance('instance', ['configs/graphite_rollup.xml'])
 
 @pytest.fixture(scope="module")
 def started_cluster():
-    cluster.up()
-    instance.query('CREATE DATABASE test')
+    try:
+        cluster.start()
+        instance.query('CREATE DATABASE test')
 
-    yield cluster
+        yield cluster
 
-    cluster.down()
+    finally:
+        cluster.shutdown()
 
 @pytest.fixture
-def test_table(started_cluster):
+def graphite_table(started_cluster):
     instance.query('''
 DROP TABLE IF EXISTS test.graphite;
 CREATE TABLE test.graphite
@@ -33,7 +35,7 @@ CREATE TABLE test.graphite
     instance.query('DROP TABLE test.graphite')
 
 
-def test1(test_table):
+def test1(graphite_table):
     timestamp = int(time.time())
     timestamp = timestamp - timestamp % 60
     date = datetime.date.today().isoformat()
@@ -61,7 +63,7 @@ one_min.x1	200	{timestamp}	{date}	2
     assert TSV(q('SELECT * FROM test.graphite')) == TSV(expected2)
 
 
-def test2(test_table):
+def test2(graphite_table):
     q = instance.query
 
     result1 = q('''
@@ -106,7 +108,7 @@ one_min.x	999634.9918367347	1111444200	2017-02-02	499999
     assert TSV(result2) == TSV(expected2)
 
 
-def test3(test_table):
+def test3(graphite_table):
     result = instance.query('''
 INSERT INTO test.graphite
     SELECT 'one_min.x' AS metric,
@@ -128,7 +130,7 @@ one_min.x	24	1111110600	2017-02-02	100
     assert TSV(result) == TSV(expected)
 
 
-def test4(test_table):
+def test4(graphite_table):
     result = instance.query('''
 INSERT INTO test.graphite
     SELECT 'one_min.x' AS metric,
@@ -159,7 +161,7 @@ SELECT * FROM test.graphite;
         assert TSV(result) == TSV(reference)
 
 
-def test_several_output_blocks(test_table):
+def test_several_output_blocks(graphite_table):
     MERGED_BLOCK_SIZE = 8192
 
     to_insert = ''
@@ -185,7 +187,7 @@ SELECT * FROM test.graphite;
     assert TSV(result) == TSV(expected)
 
 
-def test_rollup_paths_not_matching_any_pattern(test_table):
+def test_rollup_paths_not_matching_any_pattern(graphite_table):
     to_insert = '''\
 one_min.x1	100	1000000000	2001-09-09	1
 zzzzzzzz	100	1000000001	2001-09-09	1

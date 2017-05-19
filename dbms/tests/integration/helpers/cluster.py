@@ -11,7 +11,79 @@ import docker
 
 from .client import Client
 
-BASE_TESTS_DIR = p.dirname(__file__)
+
+HELPERS_DIR = p.dirname(__file__)
+
+
+class ClickHouseCluster:
+    def __init__(self, base_path, base_configs_dir=None, server_bin_path=None, client_bin_path=None):
+        self.base_dir = p.dirname(base_path)
+
+        self.base_configs_dir = base_configs_dir or os.environ.get('CLICKHOUSE_TESTS_BASE_CONFIG_DIR', '/etc/clickhouse-server/')
+        self.server_bin_path = server_bin_path or os.environ.get('CLICKHOUSE_TESTS_SERVER_BIN_PATH', '/usr/bin/clickhouse')
+        self.client_bin_path = client_bin_path or os.environ.get('CLICKHOUSE_TESTS_CLIENT_BIN_PATH', '/usr/bin/clickhouse-client')
+
+        self.project_name = os.getlogin() + p.basename(self.base_dir)
+        # docker-compose removes everything non-alphanumeric from project names so we do it too.
+        self.project_name = re.sub(r'[^a-z0-9]', '', self.project_name.lower())
+
+        self.base_cmd = ['docker-compose', '--project-directory', self.base_dir, '--project-name', self.project_name]
+        self.instances = {}
+        self.with_zookeeper = False
+        self.is_up = False
+
+
+    def add_instance(self, name, custom_configs, with_zookeeper=False):
+        if self.is_up:
+            raise Exception('Can\'t add instance %s: cluster is already up!' % name)
+
+        if name in self.instances:
+            raise Exception('Can\'t add instance %s: there is already instance with the same name!' % name)
+
+        instance = ClickHouseInstance(self.base_dir, name, custom_configs, with_zookeeper, self.base_configs_dir, self.server_bin_path)
+        self.instances[name] = instance
+        self.base_cmd.extend(['--file', instance.docker_compose_path])
+        if with_zookeeper and not self.with_zookeeper:
+            self.with_zookeeper = True
+            self.base_cmd.extend(['--file', p.join(HELPERS_DIR, 'docker_compose_zookeeper.yml')])
+
+        return instance
+
+
+    def start(self, destroy_dirs=True):
+        if self.is_up:
+            return
+
+        for instance in self.instances.values():
+            instance.create_dir(destroy_dir=destroy_dirs)
+
+        subprocess.check_call(self.base_cmd + ['up', '-d'])
+
+        docker_client = docker.from_env()
+        for instance in self.instances.values():
+            instance.docker_id = self.project_name + '_' + instance.name + '_1'
+
+            container = docker_client.containers.get(instance.docker_id)
+            instance.ip_address = container.attrs['NetworkSettings']['Networks'].values()[0]['IPAddress']
+
+            instance.wait_for_start()
+
+            instance.client = Client(instance.ip_address, command=self.client_bin_path)
+
+        self.is_up = True
+
+
+    def shutdown(self, kill=True):
+        if kill:
+            subprocess.check_call(self.base_cmd + ['kill'])
+        subprocess.check_call(self.base_cmd + ['down', '--volumes'])
+        self.is_up = False
+
+        for instance in self.instances.values():
+            instance.docker_id = None
+            instance.ip_address = None
+            instance.client = None
+
 
 DOCKER_COMPOSE_TEMPLATE = '''
 version: '2'
@@ -99,13 +171,13 @@ class ClickHouseInstance:
         config_d_dir = p.join(configs_dir, 'config.d')
         os.mkdir(config_d_dir)
 
-        shutil.copy(p.join(BASE_TESTS_DIR, 'common_instance_config.xml'), config_d_dir)
+        shutil.copy(p.join(HELPERS_DIR, 'common_instance_config.xml'), config_d_dir)
 
         with open(p.join(config_d_dir, 'macros.xml'), 'w') as macros_config:
             macros_config.write(MACROS_CONFIG_TEMPLATE.format(name=self.name))
 
         if self.with_zookeeper:
-            shutil.copy(p.join(BASE_TESTS_DIR, 'zookeeper_config.xml'), config_d_dir)
+            shutil.copy(p.join(HELPERS_DIR, 'zookeeper_config.xml'), config_d_dir)
 
         for path in self.custom_config_paths:
             shutil.copy(path, config_d_dir)
@@ -135,77 +207,3 @@ class ClickHouseInstance:
     def destroy_dir(self):
         if p.exists(self.path):
             shutil.rmtree(self.path)
-
-
-class ClickHouseCluster:
-    def __init__(self, base_path, base_configs_dir=None, server_bin_path=None, client_bin_path=None):
-        self.base_dir = p.dirname(base_path)
-
-        self.base_configs_dir = base_configs_dir or os.environ.get('CLICKHOUSE_TESTS_BASE_CONFIG_DIR', '/etc/clickhouse-server/')
-        self.server_bin_path = server_bin_path or os.environ.get('CLICKHOUSE_TESTS_SERVER_BIN_PATH', '/usr/bin/clickhouse')
-        self.client_bin_path = client_bin_path or os.environ.get('CLICKHOUSE_TESTS_CLIENT_BIN_PATH', '/usr/bin/clickhouse-client')
-
-        self.project_name = os.getlogin() + p.basename(self.base_dir)
-        # docker-compose removes everything non-alphanumeric from project names so we do it too.
-        self.project_name = re.sub(r'[^a-z0-9]', '', self.project_name.lower())
-
-        self.base_cmd = ['docker-compose', '--project-directory', self.base_dir, '--project-name', self.project_name]
-        self.instances = {}
-        self.with_zookeeper = False
-        self.is_up = False
-
-
-    def add_instance(self, name, custom_configs, with_zookeeper=False):
-        if self.is_up:
-            raise Exception('Can\'t add instance %s: cluster is already up!' % name)
-
-        if name in self.instances:
-            raise Exception('Can\'t add instance %s: there is already instance with the same name!' % name)
-
-        instance = ClickHouseInstance(self.base_dir, name, custom_configs, with_zookeeper, self.base_configs_dir, self.server_bin_path)
-        self.instances[name] = instance
-        self.base_cmd.extend(['--file', instance.docker_compose_path])
-        if with_zookeeper and not self.with_zookeeper:
-            self.with_zookeeper = True
-            self.base_cmd.extend(['--file', p.join(BASE_TESTS_DIR, 'docker_compose_zookeeper.yml')])
-
-        return instance
-
-
-    def up(self, destroy_dirs=True):
-        if self.is_up:
-            return
-
-        for instance in self.instances.values():
-            instance.create_dir(destroy_dir=destroy_dirs)
-
-        subprocess.check_call(self.base_cmd + ['up', '-d'])
-
-        try:
-            docker_client = docker.from_env()
-            for instance in self.instances.values():
-                instance.docker_id = self.project_name + '_' + instance.name + '_1'
-
-                container = docker_client.containers.get(instance.docker_id)
-                instance.ip_address = container.attrs['NetworkSettings']['Networks'].values()[0]['IPAddress']
-
-                instance.wait_for_start()
-
-                instance.client = Client(instance.ip_address, command=self.client_bin_path)
-
-        except:
-            self.down()
-            raise
-
-        self.is_up = True
-
-
-    def down(self):
-        subprocess.check_call(self.base_cmd + ['kill'])
-        subprocess.check_call(self.base_cmd + ['down', '--volumes'])
-        self.is_up = False
-
-        for instance in self.instances.values():
-            instance.docker_id = None
-            instance.ip_address = None
-            instance.client = None

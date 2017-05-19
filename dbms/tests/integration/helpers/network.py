@@ -4,7 +4,7 @@ import time
 
 import docker
 
-from .cluster import BASE_TESTS_DIR
+from .cluster import HELPERS_DIR
 
 
 class PartitionManager:
@@ -92,7 +92,7 @@ class _NetworkManager:
     def __init__(
             self,
             image_name='clickhouse_tests_helper',
-            image_path=p.join(BASE_TESTS_DIR, 'helper_container'),
+            image_path=p.join(HELPERS_DIR, 'helper_container'),
             container_expire_timeout=50, container_exit_timeout=60):
 
         self.container_expire_timeout = container_expire_timeout

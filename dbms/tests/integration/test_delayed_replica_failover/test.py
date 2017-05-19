@@ -13,20 +13,22 @@ replica2 = cluster.add_instance('replica2', [], with_zookeeper=True)
 
 @pytest.fixture(scope="module")
 def started_cluster():
-    cluster.up()
+    try:
+        cluster.start()
 
-    for replica in (replica1, replica2):
-        replica.query(
-            "CREATE TABLE replicated (d Date, x UInt32) ENGINE = "
-            "ReplicatedMergeTree('/clickhouse/tables/replicated', '{instance}', d, d, 8192)")
+        for replica in (replica1, replica2):
+            replica.query(
+                "CREATE TABLE replicated (d Date, x UInt32) ENGINE = "
+                "ReplicatedMergeTree('/clickhouse/tables/replicated', '{instance}', d, d, 8192)")
 
-    instance_with_dist_table.query(
-        "CREATE TABLE distributed (d Date, x UInt32) ENGINE = "
-        "Distributed('test_cluster', 'default', 'replicated')")
+        instance_with_dist_table.query(
+            "CREATE TABLE distributed (d Date, x UInt32) ENGINE = "
+            "Distributed('test_cluster', 'default', 'replicated')")
 
-    yield cluster
+        yield cluster
 
-    cluster.down()
+    finally:
+        cluster.shutdown()
 
 
 def test(started_cluster):
