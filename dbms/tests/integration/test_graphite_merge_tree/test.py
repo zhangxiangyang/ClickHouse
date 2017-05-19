@@ -155,3 +155,52 @@ SELECT * FROM test.graphite;
 
         with open(p.join(p.dirname(__file__), 'test4.reference')) as reference:
             assert TSV(result) == TSV(reference)
+
+
+    def test_several_output_blocks(self):
+        MERGED_BLOCK_SIZE = 8192
+
+        to_insert = ''
+        expected = ''
+        for i in range(2 * MERGED_BLOCK_SIZE + 1):
+            rolled_up_time = 1000000200 + 600 * i
+
+            for j in range(3):
+                cur_time = rolled_up_time + 100 * j
+                to_insert += 'one_min.x1	{}	{}	2001-09-09	1\n'.format(10 * j, cur_time)
+                to_insert += 'one_min.x1	{}	{}	2001-09-09	2\n'.format(10 * (j + 1), cur_time)
+
+            expected += 'one_min.x1	20	{}	2001-09-09	2\n'.format(rolled_up_time)
+
+        instance.query('INSERT INTO test.graphite FORMAT TSV', to_insert)
+
+        result = instance.query('''
+OPTIMIZE TABLE test.graphite PARTITION 200109 FINAL;
+
+SELECT * FROM test.graphite;
+''')
+
+        assert TSV(result) == TSV(expected)
+
+
+    def test_rollup_paths_not_matching_any_pattern(self):
+        to_insert = '''\
+one_min.x1	100	1000000000	2001-09-09	1
+zzzzzzzz	100	1000000001	2001-09-09	1
+zzzzzzzz	200	1000000001	2001-09-09	2
+'''
+
+        instance.query('INSERT INTO test.graphite FORMAT TSV', to_insert)
+
+        expected = '''\
+one_min.x1	100	999999600	2001-09-09	1
+zzzzzzzz	200	1000000001	2001-09-09	2
+'''
+
+        result = instance.query('''
+OPTIMIZE TABLE test.graphite PARTITION 200109 FINAL;
+
+SELECT * FROM test.graphite;
+''')
+
+        assert TSV(result) == TSV(expected)

@@ -7,12 +7,16 @@ class Client:
     def __init__(self, host, port=9000, command='/usr/bin/clickhouse-client'):
         self.host = host
         self.port = port
-        self.command = command
+        self.command = [command, '--host', self.host, '--port', str(self.port)]
 
-    def query(self, sql, timeout=10.0):
-        process = sp.Popen(
-            [self.command, '--multiquery', '--host', self.host, '--port', str(self.port)],
-            stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE)
+    def query(self, sql, stdin=None, timeout=10.0):
+        if stdin is None:
+            command = self.command + ['--multiquery']
+            stdin = sql
+        else:
+            command = self.command + ['--query', sql]
+
+        process = sp.Popen(command, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE)
 
         timer = None
         if timeout is not None:
@@ -26,18 +30,19 @@ class Client:
             timer = Timer(timeout, kill_process)
             timer.start()
 
-        stdout, stderr = process.communicate(sql)
+        stdout, stderr = process.communicate(stdin)
 
         if timer is not None:
             if timer.finished.is_set():
-                raise Exception('Query timed out!')
+                raise Exception('Client timed out!')
             else:
                 timer.cancel()
 
         if process.returncode != 0:
-            raise Exception('Query failed! Client return code: {}, stderr: {}'.format(process.returncode, stderr))
+            raise Exception('Client failed! return code: {}, stderr: {}'.format(process.returncode, stderr))
 
         return stdout
+
 
 
 class TSV:

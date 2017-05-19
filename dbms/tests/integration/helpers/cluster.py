@@ -59,8 +59,8 @@ class ClickHouseInstance:
         self.client = None
 
 
-    def query(self, sql):
-        return self.client.query(sql)
+    def query(self, sql, stdin=None):
+        return self.client.query(sql, stdin)
 
 
     def wait_for_start(self, timeout=10.0):
