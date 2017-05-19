@@ -8,6 +8,17 @@ from .cluster import HELPERS_DIR
 
 
 class PartitionManager:
+    """Allows introducing failures in the network between docker containers.
+
+    Can act as a context manager:
+
+    with pm as PartitionManager():
+        pm.partition_instances(instance1, instance2)
+        ...
+        # At exit all partitions are removed automatically.
+
+    """
+
     def __init__(self):
         self._iptables_rules = []
 
@@ -45,13 +56,17 @@ class PartitionManager:
         self.heal_all()
 
 
-# We need to call iptables to create partitions, but we want to avoid sudo.
-# The way to circumvent this restriction is to run iptables in a container with network=host.
-# The container is long-running and periodically renewed - this is an optimization to avoid the overhead
-# of container creation on each call.
-# Source of the idea: https://github.com/worstcase/blockade/blob/master/blockade/host.py
-
 class _NetworkManager:
+    """Execute commands inside a container with access to network settings.
+
+    We need to call iptables to create partitions, but we want to avoid sudo.
+    The way to circumvent this restriction is to run iptables in a container with network=host.
+    The container is long-running and periodically renewed - this is an optimization to avoid the overhead
+    of container creation on each call.
+    Source of the idea: https://github.com/worstcase/blockade/blob/master/blockade/host.py
+    """
+
+    # Singleton instance.
     _instance = None
 
     @classmethod

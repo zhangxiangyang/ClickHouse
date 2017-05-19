@@ -4,7 +4,7 @@ import datetime
 import pytest
 
 from helpers.cluster import ClickHouseCluster
-from helpers.client import TSV
+from helpers.test_tools import TSV
 
 
 cluster = ClickHouseCluster(__file__)
@@ -35,13 +35,15 @@ CREATE TABLE test.graphite
     instance.query('DROP TABLE test.graphite')
 
 
-def test1(graphite_table):
+def test_rollup_versions(graphite_table):
     timestamp = int(time.time())
-    timestamp = timestamp - timestamp % 60
+    rounded_timestamp = timestamp - timestamp % 60
     date = datetime.date.today().isoformat()
 
     q = instance.query
 
+    # Insert rows with timestamps relative to the current time so that the first retention clause is active.
+    # Two parts are created.
     q('''
 INSERT INTO test.graphite (metric, value, timestamp, date, updated) VALUES ('one_min.x1', 100, {timestamp}, '{date}', 1);
 INSERT INTO test.graphite (metric, value, timestamp, date, updated) VALUES ('one_min.x1', 200, {timestamp}, '{date}', 2);
@@ -56,16 +58,18 @@ one_min.x1	200	{timestamp}	{date}	2
 
     q('OPTIMIZE TABLE test.graphite')
 
+    # After rollup only the row with max version is retained.
     expected2 = '''\
 one_min.x1	200	{timestamp}	{date}	2
-'''.format(timestamp=timestamp, date=date)
+'''.format(timestamp=rounded_timestamp, date=date)
 
     assert TSV(q('SELECT * FROM test.graphite')) == TSV(expected2)
 
 
-def test2(graphite_table):
+def test_rollup_aggregation(graphite_table):
     q = instance.query
 
+    # This query essentially emulates what rollup does.
     result1 = q('''
 SELECT avg(v), max(upd)
 FROM (SELECT timestamp,
@@ -87,6 +91,7 @@ FROM (SELECT timestamp,
 '''
     assert TSV(result1) == TSV(expected1)
 
+    # Timestamp 1111111111 is in sufficiently distant past so that the last retention clause is active.
     result2 = q('''
 INSERT INTO test.graphite
     SELECT 'one_min.x' AS metric,
@@ -108,7 +113,7 @@ one_min.x	999634.9918367347	1111444200	2017-02-02	499999
     assert TSV(result2) == TSV(expected2)
 
 
-def test3(graphite_table):
+def test_rollup_aggregation_2(graphite_table):
     result = instance.query('''
 INSERT INTO test.graphite
     SELECT 'one_min.x' AS metric,
@@ -130,13 +135,14 @@ one_min.x	24	1111110600	2017-02-02	100
     assert TSV(result) == TSV(expected)
 
 
-def test4(graphite_table):
+def test_multiple_paths_and_versions(graphite_table):
     result = instance.query('''
 INSERT INTO test.graphite
     SELECT 'one_min.x' AS metric,
            toFloat64(number) AS value,
            toUInt32(1111111111 + intDiv(number, 3) * 600) AS timestamp,
-           toDate('2017-02-02') AS date, toUInt32(100 - number) AS updated
+           toDate('2017-02-02') AS date,
+           toUInt32(100 - number) AS updated
     FROM (SELECT * FROM system.numbers LIMIT 50);
 
 OPTIMIZE TABLE test.graphite PARTITION 201702 FINAL;
@@ -157,11 +163,11 @@ OPTIMIZE TABLE test.graphite PARTITION 201702 FINAL;
 SELECT * FROM test.graphite;
 ''')
 
-    with open(p.join(p.dirname(__file__), 'test4.reference')) as reference:
+    with open(p.join(p.dirname(__file__), 'test_multiple_paths_and_versions.reference')) as reference:
         assert TSV(result) == TSV(reference)
 
 
-def test_several_output_blocks(graphite_table):
+def test_multiple_output_blocks(graphite_table):
     MERGED_BLOCK_SIZE = 8192
 
     to_insert = ''
@@ -187,7 +193,7 @@ SELECT * FROM test.graphite;
     assert TSV(result) == TSV(expected)
 
 
-def test_rollup_paths_not_matching_any_pattern(graphite_table):
+def test_paths_not_matching_any_pattern(graphite_table):
     to_insert = '''\
 one_min.x1	100	1000000000	2001-09-09	1
 zzzzzzzz	100	1000000001	2001-09-09	1

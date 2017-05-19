@@ -42,12 +42,3 @@ class Client:
             raise Exception('Client failed! return code: {}, stderr: {}'.format(process.returncode, stderr))
 
         return stdout
-
-
-
-class TSV:
-    def __init__(self, contents):
-        self.lines = contents.readlines() if isinstance(contents, file) else contents.splitlines(True)
-
-    def __eq__(self, other):
-        return self.lines == other.lines

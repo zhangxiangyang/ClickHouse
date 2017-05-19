@@ -7,7 +7,7 @@ from helpers.network import PartitionManager
 
 cluster = ClickHouseCluster(__file__)
 
-instance_with_dist_table = cluster.add_instance('instance_with_dist_table', ['remote_servers.xml'])
+instance_with_dist_table = cluster.add_instance('instance_with_dist_table', ['configs/remote_servers.xml'])
 replica1 = cluster.add_instance('replica1', [], with_zookeeper=True)
 replica2 = cluster.add_instance('replica2', [], with_zookeeper=True)
 
@@ -42,9 +42,11 @@ def test(started_cluster):
         assert replica1.query("SELECT count() FROM replicated").strip() == ''
         assert replica2.query("SELECT count() FROM replicated").strip() == '1'
 
+        # With in_order balancing replica1 is chosen.
         assert instance_with_dist_table.query(
             "SELECT count() FROM distributed SETTINGS load_balancing='in_order'").strip() == ''
 
+        # When we set max_replica_delay, replica1 must be excluded.
         assert instance_with_dist_table.query('''
 SELECT count() FROM distributed SETTINGS
     load_balancing='in_order',
@@ -55,12 +57,14 @@ SELECT count() FROM distributed SETTINGS
 
         time.sleep(2) # allow pings to zookeeper to timeout
 
+        # At this point all replicas are stale, but the query must still go to replica2 which is the least stale one.
         assert instance_with_dist_table.query('''
 SELECT count() FROM distributed SETTINGS
     load_balancing='in_order',
     max_replica_delay_for_distributed_queries=1
 ''').strip() == '1'
 
+        # If we forbid stale replicas, the query must fail.
         with pytest.raises(Exception):
             instance_with_dist_table.query('''
 SELECT count() FROM distributed SETTINGS

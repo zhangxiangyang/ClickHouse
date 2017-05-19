@@ -16,6 +16,14 @@ HELPERS_DIR = p.dirname(__file__)
 
 
 class ClickHouseCluster:
+    """ClickHouse cluster with several instances and (possibly) ZooKeeper.
+
+    Add instances with several calls to add_instance(), then start them with the start() call.
+
+    Directories for instances are created in the directory of base_path. After cluster is started,
+    these directories will contain logs, database files, docker-compose config, ClickHouse configs etc.
+    """
+
     def __init__(self, base_path, base_configs_dir=None, server_bin_path=None, client_bin_path=None):
         self.base_dir = p.dirname(base_path)
 
@@ -34,11 +42,18 @@ class ClickHouseCluster:
 
 
     def add_instance(self, name, custom_configs, with_zookeeper=False):
+        """Add an instance to the cluster.
+
+        name - the name of the instance directory and the value of the 'instance' macro in ClickHouse.
+        custom_configs - a list of config files that will be added to config.d/ directory
+        with_zookeeper - if True, add ZooKeeper configuration to configs and ZooKeeper instances to the cluster.
+        """
+
         if self.is_up:
             raise Exception('Can\'t add instance %s: cluster is already up!' % name)
 
         if name in self.instances:
-            raise Exception('Can\'t add instance %s: there is already instance with the same name!' % name)
+            raise Exception('Can\'t add instance %s: there is already an instance with the same name!' % name)
 
         instance = ClickHouseInstance(self.base_dir, name, custom_configs, with_zookeeper, self.base_configs_dir, self.server_bin_path)
         self.instances[name] = instance
@@ -61,6 +76,7 @@ class ClickHouseCluster:
 
         docker_client = docker.from_env()
         for instance in self.instances.values():
+            # According to how docker-compose names containers.
             instance.docker_id = self.project_name + '_' + instance.name + '_1'
 
             container = docker_client.containers.get(instance.docker_id)
@@ -141,6 +157,8 @@ class ClickHouseInstance:
             if time.time() >= deadline:
                 raise Exception("Timed out while waiting for instance {} with ip address {} to start".format(self.name, self.ip_address))
 
+            # Repeatedly poll the instance address until there is something that listens there.
+            # Usually it means that ClickHouse is ready to accept queries.
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.connect((self.ip_address, 9000))
@@ -155,6 +173,8 @@ class ClickHouseInstance:
 
 
     def create_dir(self, destroy_dir=True):
+        """Create the instance directory and all the needed files there."""
+
         if destroy_dir:
             self.destroy_dir()
         elif p.exists(self.path):
