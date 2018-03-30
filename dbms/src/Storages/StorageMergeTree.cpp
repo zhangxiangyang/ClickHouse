@@ -258,6 +258,86 @@ struct CurrentlyMergingPartsTagger
 };
 
 
+void StorageMergeTree::mutate(const MutationCommands & commands, const Context & context)
+{
+    decltype(current_mutations_by_version.end()) mutation_it;
+    {
+        std::lock_guard lock(currently_merging_mutex);
+
+        Int64 version = increment.get();
+        mutation_it = current_mutations_by_version.emplace(std::piecewise_construct,
+            std::forward_as_tuple(version),
+            std::forward_as_tuple(data, version, commands.commands));
+    }
+    const MergeTreeMutation & mutation = mutation_it->second;
+
+    size_t parts_mutated = 0;
+    while (true)
+    {
+        std::optional<CurrentlyMergingPartsTagger> tagger;
+        MergeTreeData::DataPartPtr old_part;
+        bool some_locked = false;
+        {
+            std::lock_guard lock(currently_merging_mutex);
+
+            Int64 prev_version = 0;
+            if (mutation_it != current_mutations_by_version.begin())
+                prev_version = std::prev(mutation_it)->first;
+
+            for (const auto & part : data.getDataPartsVector())
+            {
+                Int64 part_mutation_version = getCurrentMutationVersion(part, lock);
+
+                if (part_mutation_version >= mutation.version)
+                    continue;
+
+                if (part_mutation_version < prev_version)
+                {
+                    LOG_TRACE(mutation.log,
+                        "Part " << part->name << " has mutation version " << part_mutation_version
+                        << ", will wait until it has version " << prev_version);
+                    some_locked = true;
+                    continue;
+                }
+
+                if (currently_merging.count(part))
+                {
+                    LOG_TRACE(mutation.log, "Part " << part->name << " is currently locked, will wait.");
+                    some_locked = true;
+                    continue;
+                }
+
+                old_part = part;
+                tagger.emplace({old_part}, old_part->bytes_on_disk, *this);
+                break;
+            }
+        }
+
+
+        if (old_part)
+        {
+            auto new_part = mutation.executeOnPart(old_part, context);
+            if (new_part)
+            {
+                data.renameTempPartAndReplace(new_part);
+                ++parts_mutated;
+            }
+        }
+        else if (some_locked)
+            sleep(1);
+        else
+            break;
+    }
+
+    {
+        std::lock_guard lock(currently_merging_mutex);
+        current_mutations_by_version.erase(mutation_it);
+    }
+
+    LOG_TRACE(mutation.log, "Finished, mutated " << parts_mutated << " parts.");
+}
+
+
 bool StorageMergeTree::merge(
     size_t aio_threshold,
     bool aggressive,
@@ -285,9 +365,10 @@ bool StorageMergeTree::merge(
     {
         std::lock_guard<std::mutex> lock(currently_merging_mutex);
 
-        auto can_merge = [this] (const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right, String *)
+        auto can_merge = [this, &lock] (const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right, String *)
         {
-            return !currently_merging.count(left) && !currently_merging.count(right);
+            return !currently_merging.count(left) && !currently_merging.count(right)
+                && getCurrentMutationVersion(left, lock) == getCurrentMutationVersion(right, lock);
         };
 
         bool selected = false;
@@ -395,6 +476,17 @@ bool StorageMergeTree::mergeTask()
         throw;
     }
 }
+
+Int64 StorageMergeTree::getCurrentMutationVersion(
+    const MergeTreeData::DataPartPtr & part,
+    std::lock_guard<std::mutex> & /* currently_merging_mutex_lock */) const
+{
+    auto it = current_mutations_by_version.upper_bound(part->info.getDataVersion());
+    if (it == current_mutations_by_version.begin())
+        return 0;
+    --it;
+    return it->first;
+};
 
 
 void StorageMergeTree::clearColumnInPartition(const ASTPtr & partition, const Field & column_name, const Context & context)

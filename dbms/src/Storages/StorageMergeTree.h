@@ -9,6 +9,7 @@
 #include <Storages/MergeTree/MergeTreeDataMerger.h>
 #include <Storages/MergeTree/DiskSpaceMonitor.h>
 #include <Storages/MergeTree/BackgroundProcessingPool.h>
+#include <Storages/MergeTree/MergeTreeMutation.h>
 #include <Common/SimpleIncrement.h>
 
 
@@ -71,6 +72,8 @@ public:
     void attachPartition(const ASTPtr & partition, bool part, const Context & context) override;
     void freezePartition(const ASTPtr & partition, const String & with_name, const Context & context) override;
 
+    void mutate(const MutationCommands & commands, const Context & context) override;
+
     void drop() override;
 
     void rename(const String & new_path_to_db, const String & new_database_name, const String & new_table_name) override;
@@ -104,8 +107,9 @@ private:
     /// For clearOldParts, clearOldTemporaryDirectories.
     AtomicStopwatch time_after_previous_cleanup;
 
-    MergeTreeData::DataParts currently_merging;
     std::mutex currently_merging_mutex;
+    MergeTreeData::DataParts currently_merging;
+    std::multimap<Int64, MergeTreeMutation> current_mutations_by_version;
 
     Logger * log;
 
@@ -123,6 +127,10 @@ private:
                String * out_disable_reason = nullptr);
 
     bool mergeTask();
+
+    Int64 getCurrentMutationVersion(
+        const MergeTreeData::DataPartPtr & part,
+        std::lock_guard<std::mutex> & /* currently_merging_mutex_lock */) const;
 
 protected:
     /** Attach the table with the appropriate name, along the appropriate path (with  / at the end),
