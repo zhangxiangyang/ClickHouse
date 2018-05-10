@@ -1694,8 +1694,6 @@ namespace
         const MergeTreeData::DataPartPtr & right,
         zkutil::ZooKeeperPtr && zookeeper, const String & zookeeper_path, const MergeTreeData & data, String * out_reason = nullptr)
     {
-        const String & partition_id = left->info.partition_id;
-
         /// You can not merge parts, among which is a part for which the quorum is unsatisfied.
         /// Note: theoretically, this could be resolved. But this will make logic more complex.
         String quorum_node_value;
@@ -1734,43 +1732,6 @@ namespace
                 return false;
             }
         }
-
-        /// You can merge the parts, if all the numbers between them are abandoned - do not correspond to any blocks.
-        for (Int64 number = left->info.max_block + 1; number <= right->info.min_block - 1; ++number)
-        {
-            String path1 = zookeeper_path +              "/block_numbers/" + partition_id + "/block-" + padIndex(number);
-            String path2 = zookeeper_path + "/nonincrement_block_numbers/" + partition_id + "/block-" + padIndex(number);
-
-            if (AbandonableLockInZooKeeper::check(path1, *zookeeper) != AbandonableLockInZooKeeper::ABANDONED &&
-                AbandonableLockInZooKeeper::check(path2, *zookeeper) != AbandonableLockInZooKeeper::ABANDONED)
-            {
-                if (out_reason)
-                    *out_reason = "Block " + toString(number) + " in gap between merging parts " + left->name + " and "
-                                  + right->name + " is not abandoned";
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-
-    /// If any of the parts is already going to be merged into a larger one, do not agree to merge it.
-    bool partsWillNotBeMergedOrDisabled(const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
-                                        ReplicatedMergeTreeQueue & queue, String * out_reason = nullptr)
-    {
-        auto set_reason = [&out_reason] (const String & part_name)
-        {
-            if (out_reason)
-                *out_reason = "Part " + part_name + " cannot be merged yet, a merge has already assigned for it or it is temporarily disabled";
-            return false;
-        };
-
-        if (queue.partWillBeMergedOrMergesDisabled(left->name))
-            return set_reason(left->name);
-
-        if (left.get() != right.get() && queue.partWillBeMergedOrMergesDisabled(right->name))
-            return set_reason(right->name);
 
         return true;
     }
@@ -1883,7 +1844,7 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
 
     auto can_merge = [&] (const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right, String *)
     {
-        return partsWillNotBeMergedOrDisabled(left, right, queue)
+        return queue.canMergeParts(left, right)
                && cached_merging_predicate.get(now, uncached_merging_predicate, merging_predicate_args_to_key, left, right);
     };
 
@@ -2527,8 +2488,8 @@ bool StorageReplicatedMergeTree::optimize(const ASTPtr & query, const ASTPtr & p
 
     auto can_merge = [this] (const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right, String * out_reason)
     {
-        return partsWillNotBeMergedOrDisabled(left, right, queue, out_reason)
-               && canMergePartsAccordingToZooKeeperInfo(left, right, getZooKeeper(), zookeeper_path, data, out_reason);
+        return queue.canMergeParts(left, right, out_reason);
+               // && canMergePartsAccordingToZooKeeperInfo(left, right, getZooKeeper(), zookeeper_path, data, out_reason);
     };
 
     ReplicatedMergeTreeLogEntryData merge_entry;
@@ -3044,8 +3005,8 @@ bool StorageReplicatedMergeTree::existsNodeCached(const std::string & path)
 }
 
 
-AbandonableLockInZooKeeper StorageReplicatedMergeTree::allocateBlockNumber(const String & partition_id, zkutil::ZooKeeperPtr & zookeeper,
-                                                                           zkutil::Requests * precheck_ops)
+AbandonableLockInZooKeeper StorageReplicatedMergeTree::allocateBlockNumber(
+    const String & partition_id, zkutil::ZooKeeperPtr & zookeeper, zkutil::Requests * precheck_ops)
 {
     String partition_path = zookeeper_path + "/block_numbers/" + partition_id;
     if (!existsNodeCached(partition_path))

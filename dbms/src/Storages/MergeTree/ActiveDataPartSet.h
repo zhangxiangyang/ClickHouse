@@ -21,10 +21,36 @@ public:
     ActiveDataPartSet(MergeTreeDataFormatVersion format_version_) : format_version(format_version_) {}
     ActiveDataPartSet(MergeTreeDataFormatVersion format_version_, const Strings & names);
 
+    /// Not thread safe
+    ActiveDataPartSet(const ActiveDataPartSet & other)
+        : format_version(other.format_version)
+        , part_info_to_name(other.part_info_to_name)
+    {}
+
+    void swap(ActiveDataPartSet & other)
+    {
+        std::swap(format_version, other.format_version);
+        std::swap(part_info_to_name, other.part_info_to_name);
+    }
+
+    ActiveDataPartSet & operator=(const ActiveDataPartSet & other)
+    {
+        if (&other != this)
+        {
+            ActiveDataPartSet tmp(other);
+            swap(tmp);
+        }
+        return *this;
+    }
+
     void add(const String & name);
+
+    std::optional<MergeTreePartInfo> getContainingPart(const MergeTreePartInfo & part_info) const;
 
     /// If not found, returns an empty string.
     String getContainingPart(const String & name) const;
+
+    Strings getPartsCoveredBy(const MergeTreePartInfo & part_info) const;
 
     Strings getParts() const; /// In ascending order of the partition_id and block number.
 
@@ -38,7 +64,7 @@ private:
 
     /// Do not block mutex.
     void addImpl(const String & name);
-    String getContainingPartImpl(const MergeTreePartInfo & part_info) const;
+    std::map<MergeTreePartInfo, String>::const_iterator getContainingPartImpl(const MergeTreePartInfo & part_info) const;
 };
 
 }
