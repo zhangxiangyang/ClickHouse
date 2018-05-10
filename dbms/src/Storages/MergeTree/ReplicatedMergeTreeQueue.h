@@ -15,26 +15,7 @@ namespace DB
 
 class MergeTreeDataMerger;
 
-
-class ReplicatedMergeTreeCanMergePredicate
-{
-public:
-    ReplicatedMergeTreeCanMergePredicate(
-        const ActiveDataPartsSet & virtual_parts_, Int64 log_pointer, ZooKeeperPtr & zookeeper);
-
-    /// Can we merge two parts according to the queue? True if there is no merge  already selected
-    /// for these parts and there are no virtual parts or unfinished inserts between them.
-    bool operator()(
-        const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
-        String * out_reason = nullptr) const;
-
-private:
-    ActiveDataPartsSet virtual_parts;
-    std::unordered_map<String, std::set<Int64>> current_inserts;
-    String last_quorum_part;
-    String inprogress_quorum_part;
-    ActiveDataPartSet next_virtual_parts;
-};
+class ReplicatedMergeTreeCanMergePredicate;
 
 
 class ReplicatedMergeTreeQueue
@@ -76,6 +57,7 @@ private:
       * In ZK records in chronological order. Here it is not necessary.
       */
     Queue queue;
+    Int64 log_pointer = 0;
 
     InsertsByTime inserts_by_time;
     time_t min_unprocessed_insert_time = 0;
@@ -95,7 +77,6 @@ private:
       */
 
     mutable std::mutex parts_mutex;
-
     ActiveDataPartSet virtual_parts;
 
     /// Provides only one simultaneous call to pullLogsToQueue.
@@ -109,7 +90,8 @@ private:
 
     void insertUnlocked(
         const LogEntryPtr & entry, std::optional<time_t> & min_unprocessed_insert_time_changed,
-        std::lock_guard<std::mutex> & /* queue_mutex_lock */);
+        std::lock_guard<std::mutex> & parts_lock,
+        std::lock_guard<std::mutex> & queue_lock);
 
     void remove(zkutil::ZooKeeperPtr zookeeper, LogEntryPtr & entry);
 
@@ -119,21 +101,21 @@ private:
     bool shouldExecuteLogEntry(
         const LogEntry & entry, String & out_postpone_reason,
         MergeTreeDataMerger & merger, MergeTreeData & data,
-        std::lock_guard<std::mutex> & queue_mutex_lock) const;
+        std::lock_guard<std::mutex> & queue_lock) const;
 
     /** Check that part isn't in currently generating parts and isn't covered by them.
       * Should be called under queue_mutex.
       */
     bool isNotCoveredByFuturePartsImpl(
         const String & new_part_name, String & out_reason,
-        std::lock_guard<std::mutex> & queue_mutex_lock) const;
+        std::lock_guard<std::mutex> & queue_lock) const;
 
     /// After removing the queue element, update the insertion times in the RAM. Running under mutex.
     /// Returns information about what times have changed - this information can be passed to updateTimesInZooKeeper.
     void updateTimesOnRemoval(const LogEntryPtr & entry,
         std::optional<time_t> & min_unprocessed_insert_time_changed,
         std::optional<time_t> & max_processed_insert_time_changed,
-        std::unique_lock<std::mutex> & queue_mutex_lock);
+        std::unique_lock<std::mutex> & queue_lock);
 
     /// Update the insertion times in ZooKeeper.
     void updateTimesInZooKeeper(zkutil::ZooKeeperPtr zookeeper,
@@ -141,10 +123,7 @@ private:
         std::optional<time_t> max_processed_insert_time_changed) const;
 
     /// Returns list of currently executing entries blocking execution of specified CLEAR_COLUMN command
-    Queue getConflictsForClearColumnCommand(const LogEntry & entry, String * out_conflicts_description, std::lock_guard<std::mutex> & queue_mutex_lock) const;
-
-    /// Get the map: partition ID -> block numbers of inserts that are currently committing.
-    std::unordered_map<String, std::set<Int64>> loadCurrentInserts(zkutil::ZooKeeperPtr & zookeeper) const;
+    Queue getConflictsForClearColumnCommand(const LogEntry & entry, String * out_conflicts_description, std::lock_guard<std::mutex> & queue_lock) const;
 
     /// Marks the element of the queue as running.
     class CurrentlyExecuting
@@ -169,7 +148,6 @@ public:
     ReplicatedMergeTreeQueue(MergeTreeDataFormatVersion format_version_)
         : format_version(format_version_)
         , virtual_parts(format_version)
-        , next_virtual_parts(format_version)
     {
     }
 
@@ -223,6 +201,8 @@ public:
       */
     bool processEntry(std::function<zkutil::ZooKeeperPtr()> get_zookeeper, LogEntryPtr & entry, const std::function<bool(LogEntryPtr &)> func);
 
+    ReplicatedMergeTreeCanMergePredicate getMergePredicate(zkutil::ZooKeeperPtr & zookeeper) const;
+
     /// Prohibit merges in the specified range.
     void disableMergesInRange(const String & part_name);
 
@@ -257,6 +237,29 @@ public:
 
     /// Get information about the insertion times.
     void getInsertTimes(time_t & out_min_unprocessed_insert_time, time_t & out_max_processed_insert_time) const;
+};
+
+
+class ReplicatedMergeTreeCanMergePredicate
+{
+public:
+    ReplicatedMergeTreeCanMergePredicate(
+        const ActiveDataPartSet & virtual_parts_, Int64 log_pointer,
+        const String & zookeeper_path, zkutil::ZooKeeperPtr & zookeeper);
+
+    /// Can we merge two parts according to the queue? True if there is no merge  already selected
+    /// for these parts and there are no virtual parts or unfinished inserts between them.
+    bool operator()(
+        const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
+        String * out_reason = nullptr) const;
+
+private:
+    ActiveDataPartSet virtual_parts;
+    /// partition ID -> block numbers of in-progress inserts.
+    std::unordered_map<String, std::set<Int64>> current_inserts;
+    String last_quorum_part;
+    String inprogress_quorum_part;
+    ActiveDataPartSet next_virtual_parts;
 };
 
 

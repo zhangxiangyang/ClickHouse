@@ -344,7 +344,7 @@ private:
     /** Copies the new entries from the logs of all replicas to the queue of this replica.
       * If next_update_event != nullptr, calls this event when new entries appear in the log.
       */
-    void pullLogsToQueue(zkutil::EventPtr next_update_event = nullptr);
+    void pullLogsToQueue(zkutil::EventPtr next_update_event);
 
     /** Execute the action from the queue. Throws an exception if something is wrong.
       * Returns whether or not it succeeds. If it did not work, write it to the end of the queue.
@@ -387,6 +387,7 @@ private:
       * Returns false if any part is not in ZK.
       */
     bool createLogEntryToMergeParts(
+        zkutil::ZooKeeperPtr & zookeeper,
         const MergeTreeData::DataPartsVector & parts,
         const String & merged_name,
         bool deduplicate,

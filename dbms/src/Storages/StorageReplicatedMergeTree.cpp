@@ -1697,11 +1697,6 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
     /// Will be updated below.
     std::chrono::steady_clock::time_point now;
 
-    auto can_merge = [&] (const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right, String *)
-    {
-        return queue.canMergeParts(left, right);
-    };
-
     while (is_leader)
     {
         bool success = false;
@@ -1710,12 +1705,14 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
         {
             std::lock_guard<std::mutex> merge_selecting_lock(merge_selecting_mutex);
 
+            auto zookeeper = getZooKeeper();
+
             /// You need to load new entries into the queue before you select parts to merge.
             ///  (so we know which parts are already going to be merged).
             /// We must select parts for merge under the mutex because other threads (OPTIMIZE queries) could push new merges.
             if (merge_selecting_logs_pulling_is_required)
             {
-                pullLogsToQueue();
+                queue.pullLogsToQueue(zookeeper, nullptr);
                 merge_selecting_logs_pulling_is_required = false;
             }
 
@@ -1732,17 +1729,18 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
             }
             else
             {
-                MergeTreeDataMerger::FuturePart future_merged_part;
-
                 size_t max_parts_size_for_merge = merger.getMaxPartsSizeForMerge(data.settings.max_replicated_merges_in_queue, merges_queued);
 
-                now = std::chrono::steady_clock::now();
-
-                if (max_parts_size_for_merge > 0
-                    && merger.selectPartsToMerge(future_merged_part, false, max_parts_size_for_merge, can_merge))
+                if (max_parts_size_for_merge > 0)
                 {
-                    merge_selecting_logs_pulling_is_required = true;
-                    success = createLogEntryToMergeParts(future_merged_part.parts, future_merged_part.name, deduplicate);
+                    now = std::chrono::steady_clock::now();
+                    ReplicatedMergeTreeCanMergePredicate can_merge = queue.getMergePredicate(zookeeper);
+                    MergeTreeDataMerger::FuturePart future_merged_part;
+                    if (merger.selectPartsToMerge(future_merged_part, false, max_parts_size_for_merge, can_merge))
+                    {
+                        merge_selecting_logs_pulling_is_required = true;
+                        success = createLogEntryToMergeParts(zookeeper, future_merged_part.parts, future_merged_part.name, deduplicate);
+                    }
                 }
             }
         }
@@ -1763,10 +1761,12 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
 
 
 bool StorageReplicatedMergeTree::createLogEntryToMergeParts(
-    const MergeTreeData::DataPartsVector & parts, const String & merged_name, bool deduplicate, ReplicatedMergeTreeLogEntryData * out_log_entry)
+    zkutil::ZooKeeperPtr & zookeeper,
+    const MergeTreeData::DataPartsVector & parts,
+    const String & merged_name,
+    bool deduplicate,
+    ReplicatedMergeTreeLogEntryData * out_log_entry)
 {
-    auto zookeeper = getZooKeeper();
-
     bool all_in_zk = true;
     for (const auto & part : parts)
     {
@@ -2340,17 +2340,14 @@ bool StorageReplicatedMergeTree::optimize(const ASTPtr & query, const ASTPtr & p
         return true;
     }
 
-    auto can_merge = [this] (const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right, String * out_reason)
-    {
-        return queue.canMergeParts(left, right, out_reason);
-    };
-
     ReplicatedMergeTreeLogEntryData merge_entry;
     {
         std::lock_guard<std::mutex> merge_selecting_lock(merge_selecting_mutex);
-
         /// We must select parts for merge under the mutex because other threads (OPTIMIZE queries) could push new merges.
-        pullLogsToQueue();
+
+        auto zookeeper = getZooKeeper();
+
+        ReplicatedMergeTreeCanMergePredicate can_merge = queue.getMergePredicate(zookeeper);
 
         size_t disk_space = DiskSpaceMonitor::getUnreservedFreeSpace(full_path);
 
@@ -2385,7 +2382,7 @@ bool StorageReplicatedMergeTree::optimize(const ASTPtr & query, const ASTPtr & p
         /// It is important to pull new logs (even if creation of the entry fails due to network error)
         merge_selecting_logs_pulling_is_required = true;
 
-        if (!createLogEntryToMergeParts(future_merged_part.parts, future_merged_part.name, deduplicate, &merge_entry))
+        if (!createLogEntryToMergeParts(zookeeper, future_merged_part.parts, future_merged_part.name, deduplicate, &merge_entry))
             return handle_noop("Can't create merge queue node in ZooKeeper");
     }
 
