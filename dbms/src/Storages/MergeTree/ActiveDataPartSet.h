@@ -21,7 +21,6 @@ public:
     ActiveDataPartSet(MergeTreeDataFormatVersion format_version_) : format_version(format_version_) {}
     ActiveDataPartSet(MergeTreeDataFormatVersion format_version_, const Strings & names);
 
-    /// Not thread safe
     ActiveDataPartSet(const ActiveDataPartSet & other)
         : format_version(other.format_version)
         , part_info_to_name(other.part_info_to_name)
@@ -45,9 +44,8 @@ public:
 
     void add(const String & name);
 
-    std::optional<MergeTreePartInfo> getContainingPart(const MergeTreePartInfo & part_info) const;
-
-    /// If not found, returns an empty string.
+    /// If not found, return an empty string.
+    String getContainingPart(const MergeTreePartInfo & part_info) const;
     String getContainingPart(const String & name) const;
 
     Strings getPartsCoveredBy(const MergeTreePartInfo & part_info) const;
@@ -58,12 +56,8 @@ public:
 
 private:
     MergeTreeDataFormatVersion format_version;
-
-    mutable std::mutex mutex;
     std::map<MergeTreePartInfo, String> part_info_to_name;
 
-    /// Do not block mutex.
-    void addImpl(const String & name);
     std::map<MergeTreePartInfo, String>::const_iterator getContainingPartImpl(const MergeTreePartInfo & part_info) const;
 };
 

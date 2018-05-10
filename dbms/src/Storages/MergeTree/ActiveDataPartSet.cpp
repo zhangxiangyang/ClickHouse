@@ -8,18 +8,11 @@ ActiveDataPartSet::ActiveDataPartSet(MergeTreeDataFormatVersion format_version_,
     : format_version(format_version_)
 {
     for (const auto & name : names)
-        addImpl(name);
+        add(name);
 }
 
 
 void ActiveDataPartSet::add(const String & name)
-{
-    std::lock_guard<std::mutex> lock(mutex);
-    addImpl(name);
-}
-
-
-void ActiveDataPartSet::addImpl(const String & name)
 {
     auto part_info = MergeTreePartInfo::fromPartName(name, format_version);
 
@@ -51,19 +44,17 @@ void ActiveDataPartSet::addImpl(const String & name)
 }
 
 
-std::optional<MergeTreePartInfo> ActiveDataPartSet::getContainingPart(const MergeTreePartInfo & part_info) const
+String ActiveDataPartSet::getContainingPart(const MergeTreePartInfo & part_info) const
 {
-    std::lock_guard<std::mutex> lock(mutex);
     auto it = getContainingPartImpl(part_info);
     if (it != part_info_to_name.end())
-        return it->first;
+        return it->second;
     return {};
 }
 
 
 String ActiveDataPartSet::getContainingPart(const String & name) const
 {
-    std::lock_guard<std::mutex> lock(mutex);
     auto it = getContainingPartImpl(MergeTreePartInfo::fromPartName(name, format_version));
     if (it != part_info_to_name.end())
         return it->second;
@@ -96,8 +87,6 @@ ActiveDataPartSet::getContainingPartImpl(const MergeTreePartInfo & part_info) co
 
 Strings ActiveDataPartSet::getPartsCoveredBy(const MergeTreePartInfo & part_info) const
 {
-    std::lock_guard lock(mutex);
-
     auto it_middle = part_info_to_name.lower_bound(part_info);
     auto begin = it_middle;
     while (begin != part_info_to_name.begin())
@@ -137,8 +126,6 @@ Strings ActiveDataPartSet::getPartsCoveredBy(const MergeTreePartInfo & part_info
 
 Strings ActiveDataPartSet::getParts() const
 {
-    std::lock_guard<std::mutex> lock(mutex);
-
     Strings res;
     res.reserve(part_info_to_name.size());
     for (const auto & kv : part_info_to_name)
@@ -150,7 +137,6 @@ Strings ActiveDataPartSet::getParts() const
 
 size_t ActiveDataPartSet::size() const
 {
-    std::lock_guard<std::mutex> lock(mutex);
     return part_info_to_name.size();
 }
 
