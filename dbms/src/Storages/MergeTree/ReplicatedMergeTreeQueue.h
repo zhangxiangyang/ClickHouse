@@ -46,6 +46,10 @@ private:
     String zookeeper_path;
     String replica_path;
     String logger_name;
+    Logger * log = nullptr;
+
+    /// To access the queue, future_parts, ...
+    mutable std::mutex queue_mutex;
 
     /** The queue of what you need to do on this line to catch up. It is taken from ZooKeeper (/replicas/me/queue/).
       * In ZK records in chronological order. Here it is not necessary.
@@ -62,26 +66,23 @@ private:
     /// Used to not perform other actions at the same time with these parts.
     StringSet future_parts;
 
-    /// To access the queue, future_parts, ...
-    mutable std::mutex mutex;
-
-    /// Provides only one simultaneous call to pullLogsToQueue.
-    std::mutex pull_logs_to_queue_mutex;
-
     /** What will be the set of active parts after running the entire current queue - adding new parts and performing merges.
       * Used to determine which merges have already been assigned:
       * - if there is a part in this set, then the smaller parts inside its range are not made.
       * Additionally, special elements are also added here to explicitly disallow the merge in a certain range (see disableMergesInRange).
       * This set is protected by its mutex.
       */
+
+    mutable std::mutex parts_mutex;
+
     ActiveDataPartSet virtual_parts;
     std::unordered_map<String, std::set<Int64>> current_inserts;
     String last_quorum_part;
     String inprogress_quorum_part;
     ActiveDataPartSet next_virtual_parts;
 
-    Logger * log = nullptr;
-
+    /// Provides only one simultaneous call to pullLogsToQueue.
+    std::mutex pull_logs_to_queue_mutex;
 
     /// Put a set of (already existing) parts in virtual_parts.
     void initVirtualParts(const MergeTreeData::DataParts & parts);
@@ -89,27 +90,33 @@ private:
     /// Load (initialize) a queue from ZooKeeper (/replicas/me/queue/).
     bool load(zkutil::ZooKeeperPtr zookeeper);
 
-    void insertUnlocked(LogEntryPtr & entry, std::optional<time_t> & min_unprocessed_insert_time_changed, std::lock_guard<std::mutex> &);
+    void insertUnlocked(
+        const LogEntryPtr & entry, std::optional<time_t> & min_unprocessed_insert_time_changed,
+        std::lock_guard<std::mutex> & /* queue_mutex_lock */);
 
     void remove(zkutil::ZooKeeperPtr zookeeper, LogEntryPtr & entry);
 
     /** Can I now try this action. If not, you need to leave it in the queue and try another one.
-      * Called under the main mutex.
+      * Called under the queue_mutex.
       */
-    bool shouldExecuteLogEntry(const LogEntry & entry, String & out_postpone_reason, MergeTreeDataMerger & merger, MergeTreeData & data,
-        std::lock_guard<std::mutex> &) const;
+    bool shouldExecuteLogEntry(
+        const LogEntry & entry, String & out_postpone_reason,
+        MergeTreeDataMerger & merger, MergeTreeData & data,
+        std::lock_guard<std::mutex> & queue_mutex_lock) const;
 
     /** Check that part isn't in currently generating parts and isn't covered by them.
-      * Should be called under queue's mutex.
+      * Should be called under queue_mutex.
       */
-    bool isNotCoveredByFuturePartsImpl(const String & new_part_name, String & out_reason, std::lock_guard<std::mutex> &) const;
+    bool isNotCoveredByFuturePartsImpl(
+        const String & new_part_name, String & out_reason,
+        std::lock_guard<std::mutex> & queue_mutex_lock) const;
 
     /// After removing the queue element, update the insertion times in the RAM. Running under mutex.
     /// Returns information about what times have changed - this information can be passed to updateTimesInZooKeeper.
     void updateTimesOnRemoval(const LogEntryPtr & entry,
         std::optional<time_t> & min_unprocessed_insert_time_changed,
         std::optional<time_t> & max_processed_insert_time_changed,
-        std::unique_lock<std::mutex> &);
+        std::unique_lock<std::mutex> & queue_mutex_lock);
 
     /// Update the insertion times in ZooKeeper.
     void updateTimesInZooKeeper(zkutil::ZooKeeperPtr zookeeper,
@@ -117,7 +124,7 @@ private:
         std::optional<time_t> max_processed_insert_time_changed) const;
 
     /// Returns list of currently executing entries blocking execution of specified CLEAR_COLUMN command
-    Queue getConflictsForClearColumnCommand(const LogEntry & entry, String * out_conflicts_description, std::lock_guard<std::mutex> &) const;
+    Queue getConflictsForClearColumnCommand(const LogEntry & entry, String * out_conflicts_description, std::lock_guard<std::mutex> & queue_mutex_lock) const;
 
     /// Get the map: partition ID -> block numbers of inserts that are currently committing.
     std::unordered_map<String, std::set<Int64>> loadCurrentInserts(zkutil::ZooKeeperPtr & zookeeper) const;
@@ -134,7 +141,7 @@ private:
         /// Created only in the selectEntryToProcess function. It is called under mutex.
         CurrentlyExecuting(ReplicatedMergeTreeQueue::LogEntryPtr & entry, ReplicatedMergeTreeQueue & queue);
 
-        /// In case of fetch, we determine actual part during the execution, so we need to update entry. It is called under mutex.
+        /// In case of fetch, we determine actual part during the execution, so we need to update entry. It is called under queue_mutex.
         static void setActualPartName(const ReplicatedMergeTreeLogEntry & entry, const String & actual_part_name,
             ReplicatedMergeTreeQueue & queue);
     public:
