@@ -16,6 +16,27 @@ namespace DB
 class MergeTreeDataMerger;
 
 
+class ReplicatedMergeTreeCanMergePredicate
+{
+public:
+    ReplicatedMergeTreeCanMergePredicate(
+        const ActiveDataPartsSet & virtual_parts_, Int64 log_pointer, ZooKeeperPtr & zookeeper);
+
+    /// Can we merge two parts according to the queue? True if there is no merge  already selected
+    /// for these parts and there are no virtual parts or unfinished inserts between them.
+    bool operator()(
+        const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
+        String * out_reason = nullptr) const;
+
+private:
+    ActiveDataPartsSet virtual_parts;
+    std::unordered_map<String, std::set<Int64>> current_inserts;
+    String last_quorum_part;
+    String inprogress_quorum_part;
+    ActiveDataPartSet next_virtual_parts;
+};
+
+
 class ReplicatedMergeTreeQueue
 {
 private:
@@ -76,10 +97,6 @@ private:
     mutable std::mutex parts_mutex;
 
     ActiveDataPartSet virtual_parts;
-    std::unordered_map<String, std::set<Int64>> current_inserts;
-    String last_quorum_part;
-    String inprogress_quorum_part;
-    ActiveDataPartSet next_virtual_parts;
 
     /// Provides only one simultaneous call to pullLogsToQueue.
     std::mutex pull_logs_to_queue_mutex;
@@ -205,10 +222,6 @@ public:
       * Returns true if there were no exceptions during the processing.
       */
     bool processEntry(std::function<zkutil::ZooKeeperPtr()> get_zookeeper, LogEntryPtr & entry, const std::function<bool(LogEntryPtr &)> func);
-
-    /// Can we merge two parts according to the queue? True if there is no merge  already selected
-    /// for these parts and there are no virtual parts or unfinished inserts between them.
-    bool canMergeParts(const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right, String * out_reason = nullptr) const;
 
     /// Prohibit merges in the specified range.
     void disableMergesInRange(const String & part_name);
