@@ -44,6 +44,16 @@ public:
 
     void add(const String & name);
 
+    bool remove(const MergeTreePartInfo & part_info)
+    {
+        return part_info_to_name.erase(part_info) > 0;
+    }
+
+    bool remove(const String & part_name)
+    {
+        return remove(MergeTreePartInfo::fromPartName(part_name, format_version));
+    }
+
     /// If not found, return an empty string.
     String getContainingPart(const MergeTreePartInfo & part_info) const;
     String getContainingPart(const String & name) const;

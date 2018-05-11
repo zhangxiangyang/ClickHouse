@@ -229,7 +229,10 @@ bool ReplicatedMergeTreeQueue::remove(zkutil::ZooKeeperPtr zookeeper, const Stri
     std::optional<time_t> max_processed_insert_time_changed;
 
     {
-        std::unique_lock<std::mutex> lock(queue_mutex);
+        std::unique_lock<std::mutex> parts_lock(parts_mutex);
+        std::unique_lock<std::mutex> queue_lock(queue_mutex);
+
+        virtual_parts.remove(part_name);
 
         for (Queue::iterator it = queue.begin(); it != queue.end();)
         {
@@ -237,7 +240,7 @@ bool ReplicatedMergeTreeQueue::remove(zkutil::ZooKeeperPtr zookeeper, const Stri
             {
                 found = *it;
                 queue.erase(it++);
-                updateTimesOnRemoval(found, min_unprocessed_insert_time_changed, max_processed_insert_time_changed, lock);
+                updateTimesOnRemoval(found, min_unprocessed_insert_time_changed, max_processed_insert_time_changed, queue_lock);
                 break;
             }
             else
@@ -252,6 +255,13 @@ bool ReplicatedMergeTreeQueue::remove(zkutil::ZooKeeperPtr zookeeper, const Stri
     updateTimesInZooKeeper(zookeeper, min_unprocessed_insert_time_changed, max_processed_insert_time_changed);
 
     return true;
+}
+
+
+bool ReplicatedMergeTreeQueue::removeFromVirtualParts(const MergeTreePartInfo & part_info)
+{
+    std::unique_lock<std::mutex> parts_lock(parts_mutex);
+    return virtual_parts.remove(part_info);
 }
 
 

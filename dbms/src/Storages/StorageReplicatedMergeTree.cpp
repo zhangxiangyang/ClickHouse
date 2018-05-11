@@ -486,7 +486,7 @@ void StorageReplicatedMergeTree::createTableIfNotExists()
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/block_numbers", "",
         zkutil::CreateMode::Persistent));
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/nonincrement_block_numbers", "",
-        zkutil::CreateMode::Persistent));
+        zkutil::CreateMode::Persistent)); /// /nonincrement_block_numbers dir is unused, but create it nonetheless for backwards compatibility.
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/leader_election", "",
         zkutil::CreateMode::Persistent));
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/temp", "",
@@ -1323,7 +1323,6 @@ bool StorageReplicatedMergeTree::executeFetch(const StorageReplicatedMergeTree::
                   * - if replicas do not become active;
                   * - if there is a `quorum` node with this part;
                   * - delete `quorum` node;
-                  * - set `nonincrement_block_numbers` to resolve merges through the number of the lost part;
                   * - add a part to the list `quorum/failed_parts`;
                   * - if the part is not already removed from the list for deduplication `blocks/block_num`, then delete it;
                   *
@@ -1373,13 +1372,6 @@ bool StorageReplicatedMergeTree::executeFetch(const StorageReplicatedMergeTree::
                             throw Exception("Logical error: log entry with quorum for part covering more than one block number",
                                 ErrorCodes::LOGICAL_ERROR);
 
-                        zookeeper->createIfNotExists(zookeeper_path + "/nonincrement_block_numbers/" + part_info.partition_id, "");
-
-                        ops.emplace_back(zkutil::makeCreateRequest(
-                            zookeeper_path + "/nonincrement_block_numbers/" + part_info.partition_id + "/block-" + padIndex(part_info.min_block),
-                            "",
-                            zkutil::CreateMode::Persistent));
-
                         ops.emplace_back(zkutil::makeCreateRequest(
                             zookeeper_path + "/quorum/failed_parts/" + entry.new_part_name,
                             "",
@@ -1395,7 +1387,8 @@ bool StorageReplicatedMergeTree::executeFetch(const StorageReplicatedMergeTree::
                         if (code == ZooKeeperImpl::ZooKeeper::ZOK)
                         {
                             LOG_DEBUG(log, "Marked quorum for part " << entry.new_part_name << " as failed.");
-                            return true;    /// NOTE Deletion from `virtual_parts` is not done, but it is only necessary for merges.
+                            queue.removeFromVirtualParts(part_info);
+                            return true;
                         }
                         else if (code == ZooKeeperImpl::ZooKeeper::ZBADVERSION || code == ZooKeeperImpl::ZooKeeper::ZNONODE || code == ZooKeeperImpl::ZooKeeper::ZNODEEXISTS)
                         {
@@ -1808,7 +1801,6 @@ bool StorageReplicatedMergeTree::createLogEntryToMergeParts(
         for (Int64 number = parts[i]->info.max_block + 1; number <= parts[i + 1]->info.min_block - 1; ++number)
         {
             zookeeper->tryRemove(zookeeper_path + "/block_numbers/" + partition_id + "/block-" + padIndex(number));
-            zookeeper->tryRemove(zookeeper_path + "/nonincrement_block_numbers/" + partition_id + "/block-" + padIndex(number));
         }
     }
 

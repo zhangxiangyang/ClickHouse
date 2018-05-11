@@ -165,6 +165,8 @@ public:
       */
     bool remove(zkutil::ZooKeeperPtr zookeeper, const String & part_name);
 
+    bool removeFromVirtualParts(const MergeTreePartInfo & part_info);
+
     /** Copy the new entries from the shared log to the queue of this replica. Set the log_pointer to the appropriate value.
       * If next_update_event != nullptr, will call this event when new entries appear in the log.
       * Returns true if new entries have been.
