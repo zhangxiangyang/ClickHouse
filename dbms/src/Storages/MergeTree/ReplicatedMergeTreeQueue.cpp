@@ -787,7 +787,7 @@ ReplicatedMergeTreeCanMergePredicate ReplicatedMergeTreeQueue::getMergePredicate
         cur_log_pointer = log_pointer;
     }
 
-    return ReplicatedMergeTreeCanMergePredicate(cur_virtual_parts, cur_log_pointer, zookeeper_path, zookeeper);
+    return ReplicatedMergeTreeCanMergePredicate(std::move(cur_virtual_parts), cur_log_pointer, zookeeper_path, zookeeper);
 }
 
 
@@ -880,11 +880,14 @@ void ReplicatedMergeTreeQueue::getInsertTimes(time_t & out_min_unprocessed_inser
 
 
 ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
-    const ActiveDataPartSet & virtual_parts_, Int64 log_pointer,
+    ActiveDataPartSet virtual_parts_, Int64 log_pointer,
     const String & zookeeper_path, zkutil::ZooKeeperPtr & zookeeper)
-    : virtual_parts(virtual_parts_)
-    , next_virtual_parts(virtual_parts_)
+    : virtual_parts(std::move(virtual_parts_))
+    , next_virtual_parts(virtual_parts)
 {
+    /// NOTE: virtual_parts are copied two times. More efficient is to store in next_virtual_parts
+    /// only the parts that are not in virtual_parts but it will make the code more complicated.
+
     /// Load current inserts
     std::unordered_set<String> abandonable_lock_holders;
     for (const String & entry : zookeeper->getChildren(zookeeper_path + "/temp"))
@@ -969,6 +972,32 @@ bool ReplicatedMergeTreeCanMergePredicate::operator()(
         const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
         String * out_reason) const
 {
+    /// A sketch of a proof of why this method actually works:
+    ///
+    /// The trickiest part is to ensure that no new parts will ever appear in the range of blocks between left and right.
+    /// Inserted parts get their block numbers by acquiring an abandonable lock (see AbandonableLockInZooKeeper.h).
+    /// These block numbers are monotonically increasing in a partition.
+    ///
+    /// Because there is a window between the moment the inserted part gets its block number and
+    /// the moment it is committed (appears in the replication log), we can't get the name of all parts up to the given
+    /// block number just by looking at the replication log - some parts with smaller block numbers may be currently committing
+    /// and will appear in the log later than the parts with bigger block numbers.
+    ///
+    /// We also can't take a consistent snapshot of parts that are already committed plus parts that are about to commit
+    /// due to limitations of ZooKeeper transactions.
+    ///
+    /// So we do the following (see the constructor):
+    /// * load virtual_parts (a set of parts which corresponds to executing the replication logs up to a certain point)
+    /// * load current_inserts (inserts that have already acquired a block number but haven't appeared in the log yet)
+    /// * load virtual_parts again and store it in next_virtual_parts
+    ///
+    /// Now we have an invariant: if some part is in virtual_parts then all parts with smaller block numbers are
+    /// either in current_inserts or in next_virtual_parts (those that managed to commit before we loaded current_inserts).
+    ///
+    /// So to check that no new parts will ever appear in the range of blocks between left and right we first check that
+    /// left and right are already present in virtual_parts (we can't give a definite answer for parts that were committed later)
+    /// and then check that there aren't any parts between them in either current_inserts or next_virtual_parts.
+
     if (left->info.partition_id != right->info.partition_id)
     {
         if (out_reason)
@@ -992,21 +1021,20 @@ bool ReplicatedMergeTreeCanMergePredicate::operator()(
             return false;
         }
 
-        auto containing_part = virtual_parts.getContainingPart(part->info);
-        if (containing_part.empty())
+        if (virtual_parts.getContainingPart(part->info).empty())
         {
             if (out_reason)
                 *out_reason = "Entry for part " + part->name + " hasn't been read from the replication log yet";
             return false;
         }
 
-        if (containing_part == part->name)
-            containing_part = next_virtual_parts.getContainingPart(part->info);
-
-        if (containing_part != part->name)
+        /// We look for containing parts in next_virtual_parts (and not in virtual_parts) because next_virtual_parts is newer
+        /// and it is guaranteed that it will contain all merges assigned before this object is constructed.
+        String next_containing_part = next_virtual_parts.getContainingPart(part->info);
+        if (next_containing_part != part->name)
         {
             if (out_reason)
-                *out_reason = "Part " + part->name + " has already been assigned a merge into " + containing_part;
+                *out_reason = "Part " + part->name + " has already been assigned a merge into " + next_containing_part;
             return false;
         }
     }
@@ -1021,13 +1049,13 @@ bool ReplicatedMergeTreeCanMergePredicate::operator()(
         auto current_inserts_in_partition = current_inserts.find(left->info.partition_id);
         if (current_inserts_in_partition != current_inserts.end())
         {
-            const std::set<Int64> & ephemeral_block_numbers = current_inserts_in_partition->second;
+            const std::set<Int64> & block_numbers = current_inserts_in_partition->second;
 
-            auto left_eph_it = ephemeral_block_numbers.upper_bound(left_max_block);
-            if (left_eph_it != ephemeral_block_numbers.end() && *left_eph_it < right_min_block)
+            auto block_it = block_numbers.upper_bound(left_max_block);
+            if (block_it != block_numbers.end() && *block_it < right_min_block)
             {
                 if (out_reason)
-                    *out_reason = "Block number " + toString(*left_eph_it) + " is still being inserted between parts "
+                    *out_reason = "Block number " + toString(*block_it) + " is still being inserted between parts "
                         + left->name + " and " + right->name;
 
                 return false;
@@ -1042,7 +1070,7 @@ bool ReplicatedMergeTreeCanMergePredicate::operator()(
         {
             if (out_reason)
                 *out_reason = "There are " + toString(covered.size()) + " parts (from " + covered.front()
-                    + " to " + covered.back() + ") that are still not ready between "
+                    + " to " + covered.back() + ") that are still not present on this replica between "
                     + left->name + " and " + right->name;
             return false;
         }

@@ -486,7 +486,7 @@ void StorageReplicatedMergeTree::createTableIfNotExists()
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/block_numbers", "",
         zkutil::CreateMode::Persistent));
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/nonincrement_block_numbers", "",
-        zkutil::CreateMode::Persistent)); /// /nonincrement_block_numbers dir is unused, but create it nonetheless for backwards compatibility.
+        zkutil::CreateMode::Persistent)); /// /nonincrement_block_numbers dir is unused, but is created nonetheless for backwards compatibility.
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/leader_election", "",
         zkutil::CreateMode::Persistent));
     ops.emplace_back(zkutil::makeCreateRequest(zookeeper_path + "/temp", "",
@@ -1696,13 +1696,13 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
 
         try
         {
+            /// We must select parts for merge under merge_selecting_mutex because other threads
+            /// (OPTIMIZE queries) can assign new merges.
             std::lock_guard<std::mutex> merge_selecting_lock(merge_selecting_mutex);
 
             auto zookeeper = getZooKeeper();
 
-            /// You need to load new entries into the queue before you select parts to merge.
-            ///  (so we know which parts are already going to be merged).
-            /// We must select parts for merge under the mutex because other threads (OPTIMIZE queries) could push new merges.
+            /// You need to load new entries into the queue to count merges.
             if (merge_selecting_logs_pulling_is_required)
             {
                 queue.pullLogsToQueue(zookeeper, nullptr);
@@ -2334,18 +2334,18 @@ bool StorageReplicatedMergeTree::optimize(const ASTPtr & query, const ASTPtr & p
 
     ReplicatedMergeTreeLogEntryData merge_entry;
     {
+        /// We must select parts for merge under merge_selecting_mutex because other threads
+        /// (merge_selecting_thread or OPTIMIZE queries) could assign new merges.
         std::lock_guard<std::mutex> merge_selecting_lock(merge_selecting_mutex);
-        /// We must select parts for merge under the mutex because other threads (OPTIMIZE queries) could push new merges.
-
-        auto zookeeper = getZooKeeper();
-
-        ReplicatedMergeTreeCanMergePredicate can_merge = queue.getMergePredicate(zookeeper);
 
         size_t disk_space = DiskSpaceMonitor::getUnreservedFreeSpace(full_path);
 
         MergeTreeDataMerger::FuturePart future_merged_part;
         String disable_reason;
         bool selected = false;
+
+        auto zookeeper = getZooKeeper();
+        ReplicatedMergeTreeCanMergePredicate can_merge = queue.getMergePredicate(zookeeper);
 
         if (!partition)
         {

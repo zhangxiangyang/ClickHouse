@@ -50,7 +50,7 @@ private:
     String logger_name;
     Logger * log = nullptr;
 
-    /// To access the queue, future_parts, ...
+    /// Protects the queue, future_parts and other queue state variables.
     mutable std::mutex queue_mutex;
 
     /** The queue of what you need to do on this line to catch up. It is taken from ZooKeeper (/replicas/me/queue/).
@@ -69,14 +69,13 @@ private:
     /// Used to not perform other actions at the same time with these parts.
     StringSet future_parts;
 
-    /** What will be the set of active parts after running the entire current queue - adding new parts and performing merges.
-      * Used to determine which merges have already been assigned:
-      * - if there is a part in this set, then the smaller parts inside its range are not made.
-      * Additionally, special elements are also added here to explicitly disallow the merge in a certain range (see disableMergesInRange).
-      * This set is protected by its mutex.
-      */
-
+    /// Protects virtual_parts.
+    /// If you intend to lock both queue_mutex and parts_mutex, lock parts_mutex first.
     mutable std::mutex parts_mutex;
+
+    /** What will be the set of active parts after running the entire current queue - adding new parts and performing merges.
+      * Used to determine which merges can be assigned (see ReplicatedMergeTreeCanMergePredicate)
+      */
     ActiveDataPartSet virtual_parts;
 
     /// Provides only one simultaneous call to pullLogsToQueue.
@@ -246,22 +245,26 @@ class ReplicatedMergeTreeCanMergePredicate
 {
 public:
     ReplicatedMergeTreeCanMergePredicate(
-        const ActiveDataPartSet & virtual_parts_, Int64 log_pointer,
+        ActiveDataPartSet virtual_parts_, Int64 log_pointer,
         const String & zookeeper_path, zkutil::ZooKeeperPtr & zookeeper);
 
-    /// Can we merge two parts according to the queue? True if there is no merge  already selected
-    /// for these parts and there are no virtual parts or unfinished inserts between them.
+    /// Can we assign a merge with these two parts?
+    /// (assuming that no merge was assigned after the predicate was constructed)
     bool operator()(
         const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
         String * out_reason = nullptr) const;
 
 private:
+    /// A snapshot of active parts that would appear if the replica executes all log entries in its queue.
     ActiveDataPartSet virtual_parts;
-    /// partition ID -> block numbers of in-progress inserts.
+    /// partition ID -> block numbers of the inserts that are about to commit (loaded at some later time than virtual_parts).
     std::unordered_map<String, std::set<Int64>> current_inserts;
+    /// The same as virtual_parts but loaded at some later time than current inserts.
+    ActiveDataPartSet next_virtual_parts;
+
+    /// Quorum state taken at some later time than virtual_parts.
     String last_quorum_part;
     String inprogress_quorum_part;
-    ActiveDataPartSet next_virtual_parts;
 };
 
 

@@ -26,7 +26,9 @@ public:
         , part_info_to_name(other.part_info_to_name)
     {}
 
-    void swap(ActiveDataPartSet & other)
+    ActiveDataPartSet(ActiveDataPartSet && other) noexcept { swap(other); }
+
+    void swap(ActiveDataPartSet & other) noexcept
     {
         std::swap(format_version, other.format_version);
         std::swap(part_info_to_name, other.part_info_to_name);
