@@ -58,7 +58,6 @@ private:
       * In ZK records in chronological order. Here it is not necessary.
       */
     Queue queue;
-    Int64 log_pointer = 0;
 
     InsertsByTime inserts_by_time;
     time_t min_unprocessed_insert_time = 0;
@@ -70,11 +69,14 @@ private:
     /// Used to not perform other actions at the same time with these parts.
     StringSet future_parts;
 
-    /// Protects virtual_parts.
-    /// If you intend to lock both queue_mutex and parts_mutex, lock parts_mutex first.
-    mutable std::mutex parts_mutex;
+    /// Protects virtual_parts, log_pointer.
+    /// If you intend to lock both target_state_mutex and queue_mutex, lock target_state_mutex first.
+    mutable std::mutex target_state_mutex;
 
-    /** What will be the set of active parts after running the entire current queue - adding new parts and performing merges.
+    /// Index of the first log entry that we didn't see yet.
+    Int64 log_pointer = 0;
+
+    /** What will be the set of active parts after executing all log entries up to log_pointer.
       * Used to determine which merges can be assigned (see ReplicatedMergeTreeMergePredicate)
       */
     ActiveDataPartSet virtual_parts;
@@ -90,7 +92,7 @@ private:
 
     void insertUnlocked(
         const LogEntryPtr & entry, std::optional<time_t> & min_unprocessed_insert_time_changed,
-        std::lock_guard<std::mutex> & parts_lock,
+        std::lock_guard<std::mutex> & target_state_lock,
         std::lock_guard<std::mutex> & queue_lock);
 
     void remove(zkutil::ZooKeeperPtr zookeeper, LogEntryPtr & entry);

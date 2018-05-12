@@ -1687,9 +1687,6 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
 
     bool deduplicate = false; /// TODO: read deduplicate option from table config
 
-    /// Will be updated below.
-    std::chrono::steady_clock::time_point now;
-
     while (is_leader)
     {
         bool success = false;
@@ -1726,7 +1723,6 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
 
                 if (max_parts_size_for_merge > 0)
                 {
-                    now = std::chrono::steady_clock::now();
                     ReplicatedMergeTreeMergePredicate can_merge = queue.getMergePredicate(zookeeper);
                     MergeTreeDataMerger::FuturePart future_merged_part;
                     if (merger.selectPartsToMerge(future_merged_part, false, max_parts_size_for_merge, can_merge))
