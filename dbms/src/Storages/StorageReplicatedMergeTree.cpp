@@ -1727,7 +1727,7 @@ void StorageReplicatedMergeTree::mergeSelectingThread()
                 if (max_parts_size_for_merge > 0)
                 {
                     now = std::chrono::steady_clock::now();
-                    ReplicatedMergeTreeCanMergePredicate can_merge = queue.getMergePredicate(zookeeper);
+                    ReplicatedMergeTreeMergePredicate can_merge = queue.getMergePredicate(zookeeper);
                     MergeTreeDataMerger::FuturePart future_merged_part;
                     if (merger.selectPartsToMerge(future_merged_part, false, max_parts_size_for_merge, can_merge))
                     {
@@ -2345,7 +2345,7 @@ bool StorageReplicatedMergeTree::optimize(const ASTPtr & query, const ASTPtr & p
         bool selected = false;
 
         auto zookeeper = getZooKeeper();
-        ReplicatedMergeTreeCanMergePredicate can_merge = queue.getMergePredicate(zookeeper);
+        ReplicatedMergeTreeMergePredicate can_merge = queue.getMergePredicate(zookeeper);
 
         if (!partition)
         {

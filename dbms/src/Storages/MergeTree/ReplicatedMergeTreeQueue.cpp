@@ -775,7 +775,7 @@ bool ReplicatedMergeTreeQueue::processEntry(
 }
 
 
-ReplicatedMergeTreeCanMergePredicate ReplicatedMergeTreeQueue::getMergePredicate(zkutil::ZooKeeperPtr & zookeeper) const
+ReplicatedMergeTreeMergePredicate ReplicatedMergeTreeQueue::getMergePredicate(zkutil::ZooKeeperPtr & zookeeper) const
 {
     ActiveDataPartSet cur_virtual_parts(format_version);
     Int64 cur_log_pointer;
@@ -787,7 +787,7 @@ ReplicatedMergeTreeCanMergePredicate ReplicatedMergeTreeQueue::getMergePredicate
         cur_log_pointer = log_pointer;
     }
 
-    return ReplicatedMergeTreeCanMergePredicate(std::move(cur_virtual_parts), cur_log_pointer, zookeeper_path, zookeeper);
+    return ReplicatedMergeTreeMergePredicate(*this, std::move(cur_virtual_parts), cur_log_pointer, zookeeper);
 }
 
 
@@ -879,10 +879,11 @@ void ReplicatedMergeTreeQueue::getInsertTimes(time_t & out_min_unprocessed_inser
 }
 
 
-ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
-    ActiveDataPartSet virtual_parts_, Int64 log_pointer,
-    const String & zookeeper_path, zkutil::ZooKeeperPtr & zookeeper)
-    : virtual_parts(std::move(virtual_parts_))
+ReplicatedMergeTreeMergePredicate::ReplicatedMergeTreeMergePredicate(
+    const ReplicatedMergeTreeQueue & queue_, ActiveDataPartSet virtual_parts_, Int64 log_pointer,
+    zkutil::ZooKeeperPtr & zookeeper)
+    : queue(queue_)
+    , virtual_parts(std::move(virtual_parts_))
     , next_virtual_parts(virtual_parts)
 {
     /// NOTE: virtual_parts are copied two times. More efficient is to store in next_virtual_parts
@@ -890,18 +891,18 @@ ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
 
     /// Load current inserts
     std::unordered_set<String> abandonable_lock_holders;
-    for (const String & entry : zookeeper->getChildren(zookeeper_path + "/temp"))
+    for (const String & entry : zookeeper->getChildren(queue.zookeeper_path + "/temp"))
     {
         if (startsWith(entry, "abandonable_lock-"))
-            abandonable_lock_holders.insert(zookeeper_path + "/temp/" + entry);
+            abandonable_lock_holders.insert(queue.zookeeper_path + "/temp/" + entry);
     }
 
     if (!abandonable_lock_holders.empty())
     {
-        Strings partitions = zookeeper->getChildren(zookeeper_path + "/block_numbers");
+        Strings partitions = zookeeper->getChildren(queue.zookeeper_path + "/block_numbers");
         std::vector<std::future<zkutil::ListResponse>> lock_futures;
         for (const String & partition : partitions)
-            lock_futures.push_back(zookeeper->asyncGetChildren(zookeeper_path + "/block_numbers/" + partition));
+            lock_futures.push_back(zookeeper->asyncGetChildren(queue.zookeeper_path + "/block_numbers/" + partition));
 
         struct BlockInfo
         {
@@ -920,7 +921,7 @@ ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
                 /// TODO: cache block numbers that are abandoned.
                 /// We won't need to check them on the next iteration.
                 Int64 block_number = parse<Int64>(entry.substr(strlen("block-")));
-                String zk_path = zookeeper_path + "/block_numbers/" + partitions[i] + "/" + entry;
+                String zk_path = queue.zookeeper_path + "/block_numbers/" + partitions[i] + "/" + entry;
                 block_infos.push_back(
                     BlockInfo{partitions[i], block_number, zk_path, zookeeper->asyncTryGet(zk_path)});
             }
@@ -935,7 +936,7 @@ ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
     }
 
     /// Load log entries that appeared after we loaded virtual_parts.
-    Strings new_log_entries = zookeeper->getChildren(zookeeper_path + "/log");
+    Strings new_log_entries = zookeeper->getChildren(queue.zookeeper_path + "/log");
     String min_log_entry = "log-" + padIndex(log_pointer);
     new_log_entries.erase(
         std::remove_if(new_log_entries.begin(), new_log_entries.end(),
@@ -945,7 +946,7 @@ ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
     std::vector<std::future<zkutil::GetResponse>> new_log_entry_futures;
     for (const String & entry : new_log_entries)
         new_log_entry_futures.push_back(
-            zookeeper->asyncTryGet(zookeeper_path + "/log/" + entry));
+            zookeeper->asyncTryGet(queue.zookeeper_path + "/log/" + entry));
 
     for (auto & future : new_log_entry_futures)
     {
@@ -955,10 +956,10 @@ ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
     }
 
     /// Load current quorum status.
-    zookeeper->tryGet(zookeeper_path + "/quorum/last_part", last_quorum_part);
+    zookeeper->tryGet(queue.zookeeper_path + "/quorum/last_part", last_quorum_part);
 
     String quorum_status_str;
-    if (zookeeper->tryGet(zookeeper_path + "/quorum/status", quorum_status_str))
+    if (zookeeper->tryGet(queue.zookeeper_path + "/quorum/status", quorum_status_str))
     {
         ReplicatedMergeTreeQuorumEntry quorum_status;
         quorum_status.fromString(quorum_status_str);
@@ -968,7 +969,7 @@ ReplicatedMergeTreeCanMergePredicate::ReplicatedMergeTreeCanMergePredicate(
         inprogress_quorum_part.clear();
 }
 
-bool ReplicatedMergeTreeCanMergePredicate::operator()(
+bool ReplicatedMergeTreeMergePredicate::operator()(
         const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
         String * out_reason) const
 {

@@ -15,13 +15,14 @@ namespace DB
 
 class MergeTreeDataMerger;
 
-class ReplicatedMergeTreeCanMergePredicate;
+class ReplicatedMergeTreeMergePredicate;
 
 
 class ReplicatedMergeTreeQueue
 {
 private:
     friend class CurrentlyExecuting;
+    friend class ReplicatedMergeTreeMergePredicate;
 
     using StringSet = std::set<String>;
 
@@ -74,7 +75,7 @@ private:
     mutable std::mutex parts_mutex;
 
     /** What will be the set of active parts after running the entire current queue - adding new parts and performing merges.
-      * Used to determine which merges can be assigned (see ReplicatedMergeTreeCanMergePredicate)
+      * Used to determine which merges can be assigned (see ReplicatedMergeTreeMergePredicate)
       */
     ActiveDataPartSet virtual_parts;
 
@@ -202,7 +203,7 @@ public:
       */
     bool processEntry(std::function<zkutil::ZooKeeperPtr()> get_zookeeper, LogEntryPtr & entry, const std::function<bool(LogEntryPtr &)> func);
 
-    ReplicatedMergeTreeCanMergePredicate getMergePredicate(zkutil::ZooKeeperPtr & zookeeper) const;
+    ReplicatedMergeTreeMergePredicate getMergePredicate(zkutil::ZooKeeperPtr & zookeeper) const;
 
     /// Prohibit merges in the specified range.
     void disableMergesInRange(const String & part_name);
@@ -240,21 +241,23 @@ public:
     void getInsertTimes(time_t & out_min_unprocessed_insert_time, time_t & out_max_processed_insert_time) const;
 };
 
-
-class ReplicatedMergeTreeCanMergePredicate
+class ReplicatedMergeTreeMergePredicate
 {
 public:
-    ReplicatedMergeTreeCanMergePredicate(
-        ActiveDataPartSet virtual_parts_, Int64 log_pointer,
-        const String & zookeeper_path, zkutil::ZooKeeperPtr & zookeeper);
+    ReplicatedMergeTreeMergePredicate(
+        const ReplicatedMergeTreeQueue & queue_, ActiveDataPartSet virtual_parts_, Int64 log_pointer,
+        zkutil::ZooKeeperPtr & zookeeper);
 
     /// Can we assign a merge with these two parts?
     /// (assuming that no merge was assigned after the predicate was constructed)
+    /// If we can't and out_reason is not nullptr, set it to the reason why we can't merge.
     bool operator()(
         const MergeTreeData::DataPartPtr & left, const MergeTreeData::DataPartPtr & right,
         String * out_reason = nullptr) const;
 
 private:
+    const ReplicatedMergeTreeQueue & queue;
+
     /// A snapshot of active parts that would appear if the replica executes all log entries in its queue.
     ActiveDataPartSet virtual_parts;
     /// partition ID -> block numbers of the inserts that are about to commit (loaded at some later time than virtual_parts).
