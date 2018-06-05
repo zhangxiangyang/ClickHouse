@@ -160,7 +160,7 @@ void DataTypeWithDictionary::deserializeBinaryBulkWithMultipleStreams(
                 UInt64 num_keys;
                 readIntBinary(num_keys, *stream);
                 readIntBinary(dict_state->num_rows_to_read_until_next_index, *stream);
-                readDict(num_keys);
+                dict_state->index = readDict(num_keys);
             }
 
             size_t num_rows_to_read = std::min(limit, dict_state->num_rows_to_read_until_next_index);
