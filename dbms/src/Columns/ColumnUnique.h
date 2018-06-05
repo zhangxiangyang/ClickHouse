@@ -246,7 +246,7 @@ size_t ColumnUnique<ColumnType, IndexType>::uniqueInsert(const Field & x)
     if (pos != prev_size)
         column->popBack(1);
 
-    return static_cast<size_t>(pos);
+    return pos;
 }
 
 template <typename ColumnType, typename IndexType>
@@ -268,14 +268,15 @@ size_t ColumnUnique<ColumnType, IndexType>::uniqueInsertData(const char * pos, s
         return getDefaultValueIndex();
 
     auto size = static_cast<IndexType>(column->size());
+    auto iter = index->find(StringRefWrapper<ColumnType>(StringRef(pos, length)));
 
-    if (!index->has(StringRefWrapper<ColumnType>(StringRef(pos, length))))
+    if (iter == index->end())
     {
         column->insertData(pos, length);
-        return static_cast<size_t>(insertIntoMap(StringRefWrapper<ColumnType>(StringRef(pos, length)), size));
+        return insertIntoMap(StringRefWrapper<ColumnType>(column, size), size);
     }
 
-    return size;
+    return iter->second;
 }
 
 template <typename ColumnType, typename IndexType>
