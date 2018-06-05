@@ -69,17 +69,16 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
         SubstreamPath path) const
 {
     const ColumnWithDictionary & column_with_dictionary = typeid_cast<const ColumnWithDictionary &>(column);
-    MutableColumnPtr sub_index;
 
     size_t max_limit = column.size() - offset;
     limit = limit ? std::min(limit, max_limit) : max_limit;
 
-    path.push_back(Substream::DictionaryKeys);
+    path.push_back(Substream::DictionaryIndexes);
     if (auto stream = getter(path))
     {
         const auto & indexes = column_with_dictionary.getIndexesPtr();
         const auto & keys = column_with_dictionary.getUnique()->getNestedColumn();
-        sub_index = (*indexes->cut(offset, limit)).mutate();
+        MutableColumnPtr sub_index = (*indexes->cut(offset, limit)).mutate();
         ColumnPtr unique_indexes = makeSubIndex(*sub_index);
         /// unique_indexes->index(sub_index) == indexes[offset:offset + limit]
         auto used_keys = keys->index(unique_indexes, 0);
@@ -91,16 +90,11 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
         UInt64 indexes_size = sub_index->size();
         writeIntBinary(indexes_size, *stream);
 
+        indexes_type->serializeBinaryBulk(*sub_index, *stream, 0, limit);
+
+        path.back() = Substream::DictionaryKeys;
         dictionary_type->serializeBinaryBulkWithMultipleStreams(*used_keys, getter, 0, 0,
                                                                 position_independent_encoding, path);
-    }
-    path.back() = Substream::DictionaryIndexes;
-    if (auto stream = getter(path))
-    {
-        if (!sub_index)
-            throw Exception("Dictionary keys wasn't serialized", ErrorCodes::LOGICAL_ERROR);
-
-        indexes_type->serializeBinaryBulk(*sub_index, *stream, 0, limit);
     }
 }
 
@@ -110,7 +104,7 @@ struct DeserializeBinaryBulkStateWithDictionary : public IDataType::DeserializeB
     ColumnPtr index;
     IDataType::DeserializeBinaryBulkStatePtr state;
 
-    DeserializeBinaryBulkStateWithDictionary(IDataType::DeserializeBinaryBulkStatePtr && state)
+    explicit DeserializeBinaryBulkStateWithDictionary(IDataType::DeserializeBinaryBulkStatePtr && state)
             : state(std::move(state)) {}
 };
 
@@ -142,45 +136,38 @@ void DataTypeWithDictionary::deserializeBinaryBulkWithMultipleStreams(
         column_with_dictionary.getIndexes()->insertRangeFrom(*index->index(std::move(index_col), 0), 0, num_rows);
     };
 
-    auto readDict = [&](ReadBuffer * stream, UInt64 & num_indexes)
+    auto readDict = [&](UInt64 num_keys)
     {
-        UInt64 num_keys;
-        readIntBinary(num_keys, *stream);
-        readIntBinary(num_indexes, *stream);
         auto dict_column = dictionary_type->createColumn();
         dictionary_type->deserializeBinaryBulkWithMultipleStreams(*dict_column, getter, num_keys, 0,
                                                                   position_independent_encoding, path, dict_state->state);
         return column_with_dictionary.getUnique()->uniqueInsertRangeFrom(*dict_column, 0, num_keys);
     };
 
-    path.push_back(Substream::DictionaryKeys);
+    path.push_back(Substream::DictionaryIndexes);
 
-    while (limit)
+    if (auto stream = getter(path))
     {
-        if (dict_state->num_rows_to_read_until_next_index == 0)
+        path.back() = Substream::DictionaryKeys;
+
+        while (limit)
         {
-            path.back() = Substream::DictionaryKeys;
-            if (ReadBuffer * stream = getter(path))
+            if (dict_state->num_rows_to_read_until_next_index == 0)
             {
                 if (stream->eof())
-                    return;
+                    break;
 
-                dict_state->index = readDict(stream, dict_state->num_rows_to_read_until_next_index);
+                UInt64 num_keys;
+                readIntBinary(num_keys, *stream);
+                readIntBinary(dict_state->num_rows_to_read_until_next_index, *stream);
+                readDict(num_keys);
             }
-            else
-                return;
-        }
 
-        path.back() = Substream::DictionaryIndexes;
-        if (auto stream = getter(path))
-        {
             size_t num_rows_to_read = std::min(limit, dict_state->num_rows_to_read_until_next_index);
             readIndexes(stream, dict_state->index, num_rows_to_read);
             limit -= num_rows_to_read;
             dict_state->num_rows_to_read_until_next_index -= num_rows_to_read;
         }
-        else
-            return;
     }
 }
 
