@@ -90,11 +90,11 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
         UInt64 indexes_size = sub_index->size();
         writeIntBinary(indexes_size, *stream);
 
-        indexes_type->serializeBinaryBulk(*sub_index, *stream, 0, limit);
-
         path.back() = Substream::DictionaryKeys;
         dictionary_type->serializeBinaryBulkWithMultipleStreams(*used_keys, getter, 0, 0,
                                                                 position_independent_encoding, path);
+
+        indexes_type->serializeBinaryBulk(*sub_index, *stream, 0, limit);
     }
 }
 
