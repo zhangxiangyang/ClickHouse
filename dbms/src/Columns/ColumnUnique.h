@@ -262,6 +262,9 @@ size_t ColumnUnique<ColumnType, IndexType>::uniqueInsertFrom(const IColumn & src
 template <typename ColumnType, typename IndexType>
 size_t ColumnUnique<ColumnType, IndexType>::uniqueInsertData(const char * pos, size_t length)
 {
+    if (!index)
+        buildIndex();
+
     auto column = getRawColumnPtr();
 
     if (column->getDataAt(getDefaultValueIndex()) == StringRef(pos, length))
