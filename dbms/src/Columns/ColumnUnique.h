@@ -57,8 +57,8 @@ private:
     explicit ColumnUnique(MutableColumnPtr && holder);
     explicit ColumnUnique(const DataTypePtr & type);
     ColumnUnique(const ColumnUnique & other)
-            : column_holder(other.column_holder), nullable_column(nullable_column)
-            , nullable_column_map(nullable_column_map), is_nullable(other.is_nullable) {}
+            : column_holder(other.column_holder), nullable_column(other.nullable_column)
+            , nullable_column_map(other.nullable_column_map), is_nullable(other.is_nullable) {}
 
 public:
     const ColumnPtr & getNestedColumn() const override;
