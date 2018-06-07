@@ -1325,7 +1325,7 @@ private:
             throw Exception{"CAST AS Array can only be performed between same-dimensional array types or from String", ErrorCodes::TYPE_MISMATCH};
 
         /// Prepare nested type conversion
-        const auto nested_function = prepare(from_nested_type, to_nested_type);
+        const auto nested_function = prepareUnpackDictionaries(from_nested_type, to_nested_type);
 
         return [nested_function, from_nested_type, to_nested_type](
             Block & block, const ColumnNumbers & arguments, const size_t result, size_t /*input_rows_count*/)
