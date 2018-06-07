@@ -1241,7 +1241,8 @@ public:
 
     PreparedFunctionPtr prepare(const Block & /*sample_block*/) const override
     {
-        return std::make_shared<PreparedFunctionCast>(prepare(getArgumentTypes()[0], getReturnType()), name);
+        return std::make_shared<PreparedFunctionCast>(
+                prepareUnpackDictionaries(getArgumentTypes()[0], getReturnType()), name);
     }
 
     String getName() const override { return name; }
