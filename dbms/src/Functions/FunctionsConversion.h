@@ -1379,7 +1379,7 @@ private:
 
         /// Create conversion wrapper for each element in tuple
         for (const auto & idx_type : ext::enumerate(from_type->getElements()))
-            element_wrappers.push_back(prepare(idx_type.second, to_element_types[idx_type.first]));
+            element_wrappers.push_back(prepareUnpackDictionaries(idx_type.second, to_element_types[idx_type.first]));
 
         return [element_wrappers, from_element_types, to_element_types]
             (Block & block, const ColumnNumbers & arguments, const size_t result, size_t input_rows_count)
