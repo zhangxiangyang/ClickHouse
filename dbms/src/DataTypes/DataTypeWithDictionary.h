@@ -24,15 +24,24 @@ public:
 
     void enumerateStreams(StreamCallback callback, SubstreamPath path) const override;
 
+    SerializeBinaryBulkStatePtr serializeBinaryBulkStatePrefix(
+            OutputStreamGetter getter, SubstreamPath path) const override;
+
+    void serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr & state) const override;
+
+    DeserializeBinaryBulkStatePtr deserializeBinaryBulkStatePrefix(
+            InputStreamGetter getter, SubstreamPath path) const override;
+
+    void deserializeBinaryBulkStateSuffix(const DeserializeBinaryBulkStatePtr & state) const override;
+
     void serializeBinaryBulkWithMultipleStreams(
             const IColumn & column,
             OutputStreamGetter getter,
             size_t offset,
             size_t limit,
             bool position_independent_encoding,
-            SubstreamPath path) const override;
-
-    DeserializeBinaryBulkStatePtr createDeserializeBinaryBulkState() const override;
+            SubstreamPath path,
+            const SerializeBinaryBulkStatePtr & state) const override;
 
     void deserializeBinaryBulkWithMultipleStreams(
             IColumn & column,
@@ -42,6 +51,20 @@ public:
             bool position_independent_encoding,
             SubstreamPath path,
             const DeserializeBinaryBulkStatePtr & state) const override;
+
+    void serializeBinaryBulkFromSingleColumn(
+            const IColumn & column,
+            WriteBuffer & ostr,
+            size_t offset,
+            size_t limit,
+            bool position_independent_encoding) const override;
+
+    void deserializeBinaryBulkToSingleColumn(
+            IColumn & column,
+            ReadBuffer & istr,
+            size_t limit,
+            double avg_value_size_hint,
+            bool position_independent_encoding) const override;
 
     void serializeBinary(const Field & field, WriteBuffer & ostr) const override;
     void deserializeBinary(Field & field, ReadBuffer & istr) const override;

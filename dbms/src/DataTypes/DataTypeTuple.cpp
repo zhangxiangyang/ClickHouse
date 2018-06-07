@@ -292,20 +292,84 @@ void DataTypeTuple::enumerateStreams(StreamCallback callback, SubstreamPath path
     }
 }
 
+struct SerializeBinaryBulkStateTuple : public IDataType::SerializeBinaryBulkState
+{
+    std::vector<IDataType::SerializeBinaryBulkStatePtr> states;
+};
+
+struct DeserializeBinaryBulkStateTuple : public IDataType::DeserializeBinaryBulkState
+{
+    std::vector<IDataType::DeserializeBinaryBulkStatePtr> states;
+};
+
+IDataType::SerializeBinaryBulkStatePtr
+DataTypeTuple::serializeBinaryBulkStatePrefix(OutputStreamGetter getter, SubstreamPath path) const
+{
+    auto state = std::make_shared<SerializeBinaryBulkStateTuple>();
+
+    state->states.reserve(elems.size());
+    path.push_back(Substream::TupleElement);
+    for (size_t i = 0; i < elems.size(); ++i)
+    {
+        path.back().tuple_element_name = names[i];
+        state->states.emplace_back(elems[i]->serializeBinaryBulkStatePrefix(getter, path));
+    }
+
+    return state;
+}
+
+
+void DataTypeTuple::serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr & state) const
+{
+    auto * tuple_state = typeid_cast<SerializeBinaryBulkStateTuple *>(state.get());
+    for (size_t i = 0; i < elems.size(); ++i)
+        elems[i]->serializeBinaryBulkStateSuffix(tuple_state->states[i]);
+}
+
+
+IDataType::DeserializeBinaryBulkStatePtr
+DataTypeTuple::deserializeBinaryBulkStatePrefix(InputStreamGetter getter, SubstreamPath path) const
+{
+    auto state = std::make_shared<DeserializeBinaryBulkStateTuple>();
+
+    state->states.reserve(elems.size());
+    path.push_back(Substream::TupleElement);
+    for (size_t i = 0; i < elems.size(); ++i)
+    {
+        path.back().tuple_element_name = names[i];
+        state->states.emplace_back(elems[i]->deserializeBinaryBulkStatePrefix(getter, path));
+    }
+
+    return state;
+}
+
+
+void DataTypeTuple::deserializeBinaryBulkStateSuffix(const DeserializeBinaryBulkStatePtr & state) const
+{
+    auto * tuple_state = typeid_cast<DeserializeBinaryBulkStateTuple *>(state.get());
+    for (size_t i = 0; i < elems.size(); ++i)
+        elems[i]->deserializeBinaryBulkStateSuffix(tuple_state->states[i]);
+}
+
+
 void DataTypeTuple::serializeBinaryBulkWithMultipleStreams(
     const IColumn & column,
     OutputStreamGetter getter,
     size_t offset,
     size_t limit,
     bool position_independent_encoding,
-    SubstreamPath path) const
+    SubstreamPath path
+    const SerializeBinaryBulkStatePtr & state) const
 {
+    auto * tuple_state = typeid_cast<SerializeBinaryBulkStateTuple *>(state.get());
+
     path.push_back(Substream::TupleElement);
     for (const auto i : ext::range(0, ext::size(elems)))
     {
         path.back().tuple_element_name = names[i];
         elems[i]->serializeBinaryBulkWithMultipleStreams(
-            extractElementColumn(column, i), getter, offset, limit, position_independent_encoding, path);
+            extractElementColumn(column, i), getter, offset, limit,
+            position_independent_encoding, path, tuple_state->states[i]);
     }
 }
 
@@ -329,6 +393,37 @@ void DataTypeTuple::deserializeBinaryBulkWithMultipleStreams(
                 position_independent_encoding, path, tuple_state->states[i]);
     }
 }
+
+
+void DataTypeTuple::serializeBinaryBulkFromSingleColumn(
+    const IColumn & column,
+    WriteBuffer & ostr,
+    size_t offset,
+    size_t limit,
+    bool position_independent_encoding) const
+{
+    for (const auto i : ext::range(0, ext::size(elems)))
+    {
+        elems[i]->serializeBinaryBulkFromSingleColumn(
+                extractElementColumn(column, i), ostr, offset, limit, position_independent_encoding);
+    }
+}
+
+
+void DataTypeTuple::deserializeBinaryBulkToSingleColumn(
+    IColumn & column,
+    ReadBuffer & istr,
+    size_t limit,
+    double avg_value_size_hint,
+    bool position_independent_encoding) const
+{
+    for (const auto i : ext::range(0, ext::size(elems)))
+    {
+        elems[i]->deserializeBinaryBulkToSingleColumn(
+                extractElementColumn(column, i), istr, limit, avg_value_size_hint, position_independent_encoding);
+    }
+}
+
 
 MutableColumnPtr DataTypeTuple::createColumn() const
 {

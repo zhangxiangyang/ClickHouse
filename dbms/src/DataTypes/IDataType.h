@@ -102,6 +102,35 @@ public:
     using OutputStreamGetter = std::function<WriteBuffer*(const SubstreamPath &)>;
     using InputStreamGetter = std::function<ReadBuffer*(const SubstreamPath &)>;
 
+    struct SerializeBinaryBulkState
+    {
+        virtual ~SerializeBinaryBulkState() = default;
+    };
+    struct DeserializeBinaryBulkState
+    {
+        virtual ~DeserializeBinaryBulkState() = default;
+        virtual void clear() {};
+    };
+
+    using SerializeBinaryBulkStatePtr = std::shared_ptr<SerializeBinaryBulkState>;
+    using DeserializeBinaryBulkStatePtr = std::shared_ptr<DeserializeBinaryBulkState>;
+
+    /// Call before before serializeBinaryBulkWithMultipleStreams chain to get SerializeBinaryBulkStatePtr.
+    virtual SerializeBinaryBulkStatePtr serializeBinaryBulkStatePrefix(OutputStreamGetter, SubstreamPath) const
+    {
+        return nullptr;
+    }
+    /// Call after serializeBinaryBulkWithMultipleStreams chain to finish serialization.
+    virtual void serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr &) const {}
+
+    /// Call before before deserializeBinaryBulkWithMultipleStreams chain to get DeserializeBinaryBulkStatePtr.
+    virtual DeserializeBinaryBulkStatePtr deserializeBinaryBulkStatePrefix(InputStreamGetter, SubstreamPath) const
+    {
+        return nullptr;
+    }
+    /// Call after deserializeBinaryBulkWithMultipleStreams chain to finish deserialization.
+    virtual void deserializeBinaryBulkStateSuffix(const DeserializeBinaryBulkStatePtr &) const {}
+
     /** 'offset' and 'limit' are used to specify range.
       * limit = 0 - means no limit.
       * offset must be not greater than size of column.
@@ -114,19 +143,12 @@ public:
         size_t offset,
         size_t limit,
         bool /*position_independent_encoding*/,
-        SubstreamPath path) const
+        SubstreamPath path,
+        const SerializeBinaryBulkStatePtr & /*state*/) const
     {
         if (WriteBuffer * stream = getter(path))
             serializeBinaryBulk(column, *stream, offset, limit);
     }
-
-    struct DeserializeBinaryBulkState
-    {
-        virtual ~DeserializeBinaryBulkState() = default;
-    };
-    using DeserializeBinaryBulkStatePtr = std::shared_ptr<DeserializeBinaryBulkState>;
-
-    virtual DeserializeBinaryBulkStatePtr createDeserializeBinaryBulkState() const { return nullptr; }
 
     /** Read no more than limit values and append them into column.
       * avg_value_size_hint - if not zero, may be used to avoid reallocations while reading column of String type.
@@ -142,6 +164,34 @@ public:
     {
         if (ReadBuffer * stream = getter(path))
             deserializeBinaryBulk(column, *stream, limit, avg_value_size_hint);
+    }
+
+    virtual void serializeBinaryBulkFromSingleColumn(
+        const IColumn & column,
+        WriteBuffer & ostr,
+        size_t offset,
+        size_t limit,
+        bool position_independent_encoding) const
+    {
+        auto getter = [&ostr](const SubstreamPath &) -> WriteBuffer * { return &ostr; };
+        SubstreamPath path;
+        auto state = serializeBinaryBulkStatePrefix(getter, path);
+        serializeBinaryBulkWithMultipleStreams(column, getter, offset, limit, position_independent_encoding, path, state);
+        serializeBinaryBulkStateSuffix(state);
+    }
+
+    virtual void deserializeBinaryBulkToSingleColumn(
+        IColumn & column,
+        ReadBuffer & istr,
+        size_t limit,
+        double avg_value_size_hint,
+        bool position_independent_encoding) const
+    {
+        auto getter = [&istr](const SubstreamPath &) -> ReadBuffer * { return &istr; };
+        SubstreamPath path;
+        auto state = deserializeBinaryBulkStatePrefix(getter, path);
+        deserializeBinaryBulkWithMultipleStreams(column, getter, limit, avg_value_size_hint, position_independent_encoding, path, state);
+        deserializeBinaryBulkStateSuffix(state);
     }
 
     /** Override these methods for data types that require just single stream (most of data types).
