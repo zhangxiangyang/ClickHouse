@@ -1594,7 +1594,7 @@ private:
             if (to_with_dict)
             {
                 auto res_column = to_with_dict->createColumn();
-                auto * col_with_dict = typeid_cast<ColumnWithDictionary *>(res.column.get());
+                auto * col_with_dict = typeid_cast<ColumnWithDictionary *>(res_column.get());
 
                 if (from_with_dict)
                 {
