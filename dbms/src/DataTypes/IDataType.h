@@ -180,7 +180,7 @@ public:
         SubstreamPath path;
         auto state = serializeBinaryBulkStatePrefix(getter, path);
         serializeBinaryBulkWithMultipleStreams(column, getter, offset, limit, position_independent_encoding, path, state);
-        serializeBinaryBulkStateSuffix(state);
+        serializeBinaryBulkStateSuffix(state, getter, path, position_independent_encoding);
     }
 
     virtual void deserializeBinaryBulkToSingleColumn(
