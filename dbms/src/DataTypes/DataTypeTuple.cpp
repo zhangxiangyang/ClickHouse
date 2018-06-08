@@ -366,7 +366,7 @@ void DataTypeTuple::serializeBinaryBulkWithMultipleStreams(
     size_t offset,
     size_t limit,
     bool position_independent_encoding,
-    SubstreamPath path
+    SubstreamPath path,
     const SerializeBinaryBulkStatePtr & state) const
 {
     auto * tuple_state = typeid_cast<SerializeBinaryBulkStateTuple *>(state.get());
