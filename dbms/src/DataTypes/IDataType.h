@@ -109,7 +109,6 @@ public:
     struct DeserializeBinaryBulkState
     {
         virtual ~DeserializeBinaryBulkState() = default;
-        virtual void clear() {};
     };
 
     using SerializeBinaryBulkStatePtr = std::shared_ptr<SerializeBinaryBulkState>;
@@ -121,7 +120,11 @@ public:
         return nullptr;
     }
     /// Call after serializeBinaryBulkWithMultipleStreams chain to finish serialization.
-    virtual void serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr &) const {}
+    virtual void serializeBinaryBulkStateSuffix(
+            const SerializeBinaryBulkStatePtr & /*state*/,
+            OutputStreamGetter /*getter*/,
+            SubstreamPath /*path*/,
+            bool /*position_independent_encoding*/) const {}
 
     /// Call before before deserializeBinaryBulkWithMultipleStreams chain to get DeserializeBinaryBulkStatePtr.
     virtual DeserializeBinaryBulkStatePtr deserializeBinaryBulkStatePrefix(InputStreamGetter, SubstreamPath) const

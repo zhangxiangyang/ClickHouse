@@ -161,9 +161,14 @@ DataTypeArray::serializeBinaryBulkStatePrefix(OutputStreamGetter getter, Substre
 }
 
 
-void DataTypeArray::serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr & state) const
+void DataTypeArray::serializeBinaryBulkStateSuffix(
+    const SerializeBinaryBulkStatePtr & state,
+    OutputStreamGetter getter,
+    SubstreamPath path,
+    bool position_independent_encoding) const
 {
-    nested->serializeBinaryBulkStateSuffix(state);
+    path.push_back(Substream::ArrayElements);
+    nested->serializeBinaryBulkStateSuffix(state, getter, path, position_independent_encoding);
 }
 
 

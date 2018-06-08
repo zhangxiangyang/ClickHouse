@@ -319,11 +319,19 @@ DataTypeTuple::serializeBinaryBulkStatePrefix(OutputStreamGetter getter, Substre
 }
 
 
-void DataTypeTuple::serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr & state) const
+void DataTypeTuple::serializeBinaryBulkStateSuffix(
+    const SerializeBinaryBulkStatePtr & state,
+    OutputStreamGetter getter,
+    SubstreamPath path,
+    bool position_independent_encoding) const
 {
     auto * tuple_state = typeid_cast<SerializeBinaryBulkStateTuple *>(state.get());
+    path.push_back(Substream::TupleElement);
     for (size_t i = 0; i < elems.size(); ++i)
-        elems[i]->serializeBinaryBulkStateSuffix(tuple_state->states[i]);
+    {
+        path.back().tuple_element_name = names[i];
+        elems[i]->serializeBinaryBulkStateSuffix(tuple_state->states[i], getter, path, position_independent_encoding);
+    }
 }
 
 

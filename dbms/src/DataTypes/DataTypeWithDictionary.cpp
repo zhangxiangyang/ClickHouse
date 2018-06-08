@@ -115,6 +115,7 @@ struct SerializeBinaryBulkStateWithDictionary : public IDataType::SerializeBinar
 struct SerializeStateWithDictionaryPerGranule : public SerializeBinaryBulkStateWithDictionary
 {
     IndexesSerializationType index_type;
+    MutableColumnPtr dictionary_keys;
 
     SerializeStateWithDictionaryPerGranule(
         IDataType::SerializeBinaryBulkStatePtr && keys_state
@@ -147,12 +148,6 @@ struct DeserializeStateWithDictionaryPerGranule : public DeserializeBinaryBulkSt
         , IndexesSerializationType index_type)
         : DeserializeBinaryBulkStateWithDictionary(std::move(keys_state), key_version)
         , index_type(index_type) {}
-
-    void clear() override
-    {
-        num_rows_to_read_until_next_index = 0;
-        keys_in_current_granule = nullptr;
-    }
 };
 
 
@@ -176,13 +171,18 @@ DataTypeWithDictionary::serializeBinaryBulkStatePrefix(OutputStreamGetter getter
     writeIntBinary(keys_ser_version_val, *stream);
     writeIntBinary(indexes_ser_type_val, *stream);
 
+    path.push_back(IDataType::Substream::DictionaryKeys);
     auto keys_state = dictionary_type->serializeBinaryBulkStatePrefix(getter, path);
     return std::make_shared<SerializeStateWithDictionaryPerGranule>(
             std::move(keys_state), keys_ser_version, indexes_ser_type);
 }
 
 
-void DataTypeWithDictionary::serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr & state) const
+void DataTypeWithDictionary::serializeBinaryBulkStateSuffix(
+    const SerializeBinaryBulkStatePtr & state,
+    OutputStreamGetter getter,
+    SubstreamPath path,
+    bool position_independent_encoding) const
 {
     if (!state)
         throw Exception("Got empty state for DataTypeWithDictionary::serializeBinaryBulkStateSuffix",
@@ -194,17 +194,38 @@ void DataTypeWithDictionary::serializeBinaryBulkStateSuffix(const SerializeBinar
                         + demangle(typeid(SerializeBinaryBulkStateWithDictionary).name()) + ", got "
                         + demangle(typeid(*state).name()), ErrorCodes::LOGICAL_ERROR);
 
+    path.push_back(Substream::DictionaryKeys);
+
     switch (ser_state->key_version)
     {
         case KeysSerializationVersion::DictionaryPerGranule:
         {
+            auto * state_per_granule = typeid_cast<SerializeStateWithDictionaryPerGranule *>(state.get());
+            if (!state_per_granule)
+                throw Exception("Invalid state for DataTypeWithDictionary::serializeBinaryBulkStateSuffix. Expected "
+                                + demangle(typeid(SerializeStateWithDictionaryPerGranule).name()) + ", got "
+                                + demangle(typeid(*state).name()), ErrorCodes::LOGICAL_ERROR);
+
+            if (state_per_granule->dictionary_keys)
+            {
+                auto * stream = getter(path);
+                if (!stream)
+                    throw Exception("Got empty stream in DataTypeWithDictionary::serializeBinaryBulkStateSuffix",
+                                    ErrorCodes::LOGICAL_ERROR);
+
+                ColumnPtr column = std::move(state_per_granule->dictionary_keys);
+                dictionary_type->serializeBinaryBulkWithMultipleStreams(
+                        *column, getter, 0, column->size(),
+                        position_independent_encoding, path, state_per_granule->keys_state);
+            }
             break;
         }
         default:
             throw Exception("Invalid KeysSerializationVersion for DataTypeWithDictionary", ErrorCodes::LOGICAL_ERROR);
     }
 
-    dictionary_type->serializeBinaryBulkStateSuffix(ser_state->keys_state);
+    auto keys_state = dictionary_type->serializeBinaryBulkStateSuffix(
+            ser_state->keys_state, getter, path, position_independent_encoding);
 }
 
 
@@ -220,16 +241,19 @@ DataTypeWithDictionary::deserializeBinaryBulkStatePrefix(InputStreamGetter gette
 
     UInt32 keys_ser_version_val;
     readIntBinary(keys_ser_version_val, *stream);
+    auto keys_ser_version = static_cast<KeysSerializationVersion>(keys_ser_version_val);
 
+    UInt32 indexes_ser_type_val;
+    if (keys_ser_version == KeysSerializationVersion::DictionaryPerGranule)
+        readIntBinary(indexes_ser_type_val, *stream);
+
+    path.push_back(IDataType::Substream::DictionaryKeys);
     auto keys_state = dictionary_type->deserializeBinaryBulkStatePrefix(getter, path);
 
-    auto keys_ser_version = static_cast<KeysSerializationVersion>(keys_ser_version_val);
     switch (keys_ser_version)
     {
         case KeysSerializationVersion::DictionaryPerGranule:
         {
-            UInt32 indexes_ser_type_val;
-            readIntBinary(indexes_ser_type_val, *stream);
             auto indexes_ser_type = static_cast<IndexesSerializationType>(indexes_ser_type_val);
             auto expected_index_typ = dataTypeToIndexesSerializationType(*indexes_type);
             if (indexes_ser_type != expected_index_typ)
@@ -289,6 +313,10 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
     if (dict_state->key_version != KeysSerializationVersion::DictionaryPerGranule)
         throw Exception("Unsupported KeysSerializationVersion for DataTypeWithDictionary", ErrorCodes::LOGICAL_ERROR);
 
+    auto * dict_per_granule_state = typeid_cast<SerializeStateWithDictionaryPerGranule *>(state.get());
+    if (!dict_per_granule_state)
+        throw Exception("Invalid SerializeBinaryBulkState.", ErrorCodes::LOGICAL_ERROR);
+
     size_t max_limit = column.size() - offset;
     limit = limit ? std::min(limit, max_limit) : max_limit;
 
@@ -300,8 +328,23 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
         MutableColumnPtr sub_index = (*indexes->cut(offset, limit)).mutate();
         ColumnPtr unique_indexes = makeSubIndex(*sub_index);
         /// unique_indexes->index(sub_index) == indexes[offset:offset + limit]
-        auto used_keys = keys->index(unique_indexes, 0);
+        MutableColumnPtr used_keys = (*keys->index(unique_indexes, 0)).mutate();
         /// (used_keys, sub_index) is ColumnWithDictionary for range [offset:offset + limit]
+
+        if (dict_per_granule_state->dictionary_keys)
+        {
+            auto * column_unique = typeid_cast<IColumnUnique *>(dict_per_granule_state->dictionary_keys.get());
+            if (!column_unique)
+                throw Exception("Invalid column type for SerializeStateWithDictionaryPerGranule. Expected: "
+                                + demangle(typeid(IColumnUnique).name()) + ", got "
+                                + demangle(typeid(*dict_per_granule_state->dictionary_keys).name()),
+                                ErrorCodes::LOGICAL_ERROR);
+
+            auto global_indexes = column_unique->uniqueInsertRangeFrom(*used_keys, 0, used_keys->size());
+            sub_index = (*global_indexes->index(std::move(sub_index), 0)).mutate();
+        }
+        else
+            dict_per_granule_state->dictionary_keys = std::move(used_keys);
 
         UInt64 used_keys_size = used_keys->size();
         writeIntBinary(used_keys_size, *stream);
@@ -310,8 +353,21 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
         writeIntBinary(indexes_size, *stream);
 
         path.back() = Substream::DictionaryKeys;
-        dictionary_type->serializeBinaryBulkWithMultipleStreams(*used_keys, getter, 0, 0,
+
+        bool keys_was_written = false;
+        auto proxy_getter = [&getter](SubstreamPath stream_path) -> WriteBuffer *
+        {
+            auto * buffer = getter(stream_path);
+            if (buffer)
+                keys_was_written = true;
+
+            return buffer;
+        };
+
+        dictionary_type->serializeBinaryBulkWithMultipleStreams(*dict_per_granule_state->dictionary_keys, proxy_getter, 0, 0,
                                                                 position_independent_encoding, path, dict_state->keys_state);
+        if (keys_was_written)
+            dict_per_granule_state->dictionary_keys = nullptr;
 
         indexes_type->serializeBinaryBulk(*sub_index, *stream, 0, limit);
     }

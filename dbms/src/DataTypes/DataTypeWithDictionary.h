@@ -27,7 +27,11 @@ public:
     SerializeBinaryBulkStatePtr serializeBinaryBulkStatePrefix(
             OutputStreamGetter getter, SubstreamPath path) const override;
 
-    void serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr & state) const override;
+    void serializeBinaryBulkStateSuffix(
+            const SerializeBinaryBulkStatePtr & state,
+            OutputStreamGetter getter,
+            SubstreamPath path,
+            bool position_independent_encoding) const override;
 
     DeserializeBinaryBulkStatePtr deserializeBinaryBulkStatePrefix(
             InputStreamGetter getter, SubstreamPath path) const override;

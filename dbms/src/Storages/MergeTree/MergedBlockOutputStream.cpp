@@ -68,12 +68,33 @@ void IMergedBlockOutputStream::addStreams(
 }
 
 
+IDataType::OutputStreamGetter IMergedBlockOutputStream::createStreamGetter(
+        const String & name, OffsetColumns & offset_columns, bool skip_offsets)
+{
+    return [&name, &offset_columns, skip_offsets] (const IDataType::SubstreamPath & substream_path) -> WriteBuffer *
+    {
+        bool is_offsets = !substream_path.empty() && substream_path.back().type == IDataType::Substream::ArraySizes;
+        if (is_offsets && skip_offsets)
+            return nullptr;
+
+        String stream_name = IDataType::getFileNameForStream(name, substream_path);
+
+        /// Don't write offsets more than one time for Nested type.
+        if (is_offsets && offset_columns.count(stream_name))
+            return nullptr;
+
+        return &column_streams[stream_name]->compressed;
+    };
+}
+
+
 void IMergedBlockOutputStream::writeData(
     const String & name,
     const IDataType & type,
     const IColumn & column,
     OffsetColumns & offset_columns,
-    bool skip_offsets)
+    bool skip_offsets,
+    const IDataType::SerializeBinaryBulkStatePtr & serialization_state)
 {
     size_t size = column.size();
     size_t prev_mark = 0;
@@ -95,6 +116,9 @@ void IMergedBlockOutputStream::writeData(
                 if (is_offsets && skip_offsets)
                     return;
 
+                if (!substream_path.empty() && substream_path.back().type == IDataType::Substream::DictionaryKeys)
+                    return;
+
                 String stream_name = IDataType::getFileNameForStream(name, substream_path);
 
                 /// Don't write offsets more than one time for Nested type.
@@ -112,22 +136,9 @@ void IMergedBlockOutputStream::writeData(
             }, {});
         }
 
-        IDataType::OutputStreamGetter stream_getter = [&] (const IDataType::SubstreamPath & substream_path) -> WriteBuffer *
-        {
-            bool is_offsets = !substream_path.empty() && substream_path.back().type == IDataType::Substream::ArraySizes;
-            if (is_offsets && skip_offsets)
-                return nullptr;
+        IDataType::OutputStreamGetter stream_getter = createStreamGetter(name, offset_columns, skip_offsets);
 
-            String stream_name = IDataType::getFileNameForStream(name, substream_path);
-
-            /// Don't write offsets more than one time for Nested type.
-            if (is_offsets && offset_columns.count(stream_name))
-                return nullptr;
-
-            return &column_streams[stream_name]->compressed;
-        };
-
-        type.serializeBinaryBulkWithMultipleStreams(column, stream_getter, prev_mark, limit, true, {});
+        type.serializeBinaryBulkWithMultipleStreams(column, stream_getter, prev_mark, limit, true, {}, serialization_state);
 
         /// So that instead of the marks pointing to the end of the compressed block, there were marks pointing to the beginning of the next one.
         type.enumerateStreams([&] (const IDataType::SubstreamPath & substream_path)
@@ -140,6 +151,9 @@ void IMergedBlockOutputStream::writeData(
 
             /// Don't write offsets more than one time for Nested type.
             if (is_offsets && offset_columns.count(stream_name))
+                return;
+
+            if (!substream_path.empty() && substream_path.back().type == IDataType::Substream::DictionaryKeys)
                 return;
 
             column_streams[stream_name]->compressed.nextIfAtEnd();
@@ -284,6 +298,11 @@ void MergedBlockOutputStream::writeSuffixAndFinalizePart(
         const NamesAndTypesList * total_column_list,
         MergeTreeData::DataPart::Checksums * additional_column_checksums)
 {
+    /// Finish columns serialization.
+    auto it = columns_list.begin();
+    for (size_t i = 0; i < columns_list.size(); ++i, ++it)
+        it->type->serializeBinaryBulkStateSuffix(serialization_states[i]);
+
     if (!total_column_list)
         total_column_list = &columns_list;
 
@@ -404,28 +423,42 @@ void MergedBlockOutputStream::writeImpl(const Block & block, const IColumn::Perm
             index_columns[i] = primary_columns[i].column->cloneEmpty();
     }
 
-    /// Now write the data.
-    for (const auto & it : columns_list)
+    if (serialization_states.empty())
     {
-        const ColumnWithTypeAndName & column = block.getByName(it.name);
+        serialization_states.reserve(columns_list.size());
+        OffsetColumns tmp_offset_columns;
+
+        for (const auto & col : columns_list)
+        {
+            auto getter = createStreamGetter(col.name, tmp_offset_columns, false);
+            serialization_states.emplace_back(col.type->serializeBinaryBulkStatePrefix(std::move(getter), {}));
+        }
+    }
+
+    /// Now write the data.
+    auto it = columns_list.begin();
+    for (size_t i = 0; i < columns_list.size(); ++i, ++it)
+    {
+        const ColumnWithTypeAndName & column = block.getByName(it->name);
 
         if (permutation)
         {
-            auto primary_column_it = primary_columns_name_to_position.find(it.name);
+            auto primary_column_it = primary_columns_name_to_position.find(it->name);
             if (primary_columns_name_to_position.end() != primary_column_it)
             {
-                writeData(column.name, *column.type, *primary_columns[primary_column_it->second].column, offset_columns, false);
+                auto & primary_column = *primary_columns[primary_column_it->second].column;
+                writeData(column.name, *column.type, primary_column, offset_columns, false, serialization_states[i]);
             }
             else
             {
                 /// We rearrange the columns that are not included in the primary key here; Then the result is released - to save RAM.
-                ColumnPtr permutted_column = column.column->permute(*permutation, 0);
-                writeData(column.name, *column.type, *permutted_column, offset_columns, false);
+                ColumnPtr permuted_column = column.column->permute(*permutation, 0);
+                writeData(column.name, *column.type, *permuted_column, offset_columns, false, serialization_states[i]);
             }
         }
         else
         {
-            writeData(column.name, *column.type, *column.column, offset_columns, false);
+            writeData(column.name, *column.type, *column.column, offset_columns, false, serialization_states[i]);
         }
     }
 
@@ -479,11 +512,20 @@ void MergedColumnOnlyOutputStream::write(const Block & block)
     if (!initialized)
     {
         column_streams.clear();
+        serialization_states.clear();
+        serialization_states.reserve(block.columns());
+        OffsetColumns tmp_offset_columns;
+
         for (size_t i = 0; i < block.columns(); ++i)
         {
-            addStreams(part_path, block.safeGetByPosition(i).name,
-                *block.safeGetByPosition(i).type, 0, skip_offsets);
+            const auto & col = block.safeGetByPosition(i);
+
+            addStreams(part_path, col.name, *col.type, 0, skip_offsets);
+
+            auto getter = createStreamGetter(col.name, tmp_offset_columns, false);
+            serialization_states.emplace_back(col.type->serializeBinaryBulkStatePrefix(std::move(getter), {}));
         }
+
         initialized = true;
     }
 
@@ -493,7 +535,7 @@ void MergedColumnOnlyOutputStream::write(const Block & block)
     for (size_t i = 0; i < block.columns(); ++i)
     {
         const ColumnWithTypeAndName & column = block.safeGetByPosition(i);
-        writeData(column.name, *column.type, *column.column, offset_columns, skip_offsets);
+        writeData(column.name, *column.type, *column.column, offset_columns, skip_offsets, serialization_states[i]);
     }
 
     size_t written_for_last_mark = (storage.index_granularity - index_offset + rows) % storage.index_granularity;
@@ -507,6 +549,10 @@ void MergedColumnOnlyOutputStream::writeSuffix()
 
 MergeTreeData::DataPart::Checksums MergedColumnOnlyOutputStream::writeSuffixAndGetChecksums()
 {
+    /// Finish columns serialization.
+    for (size_t i = 0; i < header.columns(); ++i)
+        header.safeGetByPosition(i).type->serializeBinaryBulkStateSuffix(serialization_states[i]);
+
     MergeTreeData::DataPart::Checksums checksums;
 
     for (auto & column_stream : column_streams)
@@ -519,6 +565,7 @@ MergeTreeData::DataPart::Checksums MergedColumnOnlyOutputStream::writeSuffixAndG
     }
 
     column_streams.clear();
+    serialization_states.clear();
     initialized = false;
 
     return checksums;

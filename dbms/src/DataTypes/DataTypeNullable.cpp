@@ -54,9 +54,14 @@ DataTypeNullable::serializeBinaryBulkStatePrefix(OutputStreamGetter getter, Subs
 }
 
 
-void DataTypeNullable::serializeBinaryBulkStateSuffix(const SerializeBinaryBulkStatePtr & state) const
+void DataTypeNullable::serializeBinaryBulkStateSuffix(
+    const SerializeBinaryBulkStatePtr & state,
+    OutputStreamGetter getter,
+    SubstreamPath path,
+    bool position_independent_encoding) const
 {
-    nested_data_type->serializeBinaryBulkStateSuffix(state);
+    path.push_back(Substream::NullableElements);
+    nested_data_type->serializeBinaryBulkStateSuffix(state, getter, path, position_independent_encoding);
 }
 
 
