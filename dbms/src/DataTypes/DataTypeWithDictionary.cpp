@@ -297,7 +297,7 @@ void DataTypeWithDictionary::deserializeBinaryBulkStateSuffix(const DeserializeB
             throw Exception("Invalid KeysSerializationVersion for DataTypeWithDictionary", ErrorCodes::LOGICAL_ERROR);
     }
 
-    dictionary_type->serializeBinaryBulkStateSuffix(deser_state->keys_state);
+    dictionary_type->deserializeBinaryBulkStateSuffix(deser_state->keys_state);
 }
 
 
@@ -366,7 +366,7 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
         path.back() = Substream::DictionaryKeys;
 
         bool keys_was_written = false;
-        auto proxy_getter = [&getter, &keys_was_written, dict_per_granule_state](SubstreamPath stream_path) -> WriteBuffer *
+        auto proxy_getter = [&getter, &keys_was_written, global_keys](SubstreamPath stream_path) -> WriteBuffer *
         {
             auto * buffer = getter(stream_path);
             if (buffer && !keys_was_written)
@@ -498,7 +498,7 @@ void DataTypeWithDictionary::deserializeBinaryBulkToSingleColumn(
         IColumn & column,
         ReadBuffer & istr,
         size_t limit,
-        double avg_value_size_hint,
+        double /*avg_value_size_hint*/,
         bool position_independent_encoding) const
 {
     ColumnWithDictionary & column_with_dictionary = typeid_cast<ColumnWithDictionary &>(column);
