@@ -317,7 +317,7 @@ void DataTypeArray::deserializeBinaryBulkToSingleColumn(
     IColumn & column,
     ReadBuffer & istr,
     size_t limit,
-    double avg_value_size_hint,
+    double /*avg_value_size_hint*/,
     bool position_independent_encoding) const
 {
     ColumnArray & column_array = typeid_cast<ColumnArray &>(column);

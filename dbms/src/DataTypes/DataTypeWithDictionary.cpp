@@ -214,8 +214,15 @@ void DataTypeWithDictionary::serializeBinaryBulkStateSuffix(
                                     ErrorCodes::LOGICAL_ERROR);
 
                 ColumnPtr column = std::move(state_per_granule->dictionary_keys);
+                auto * column_unique = typeid_cast<const ColumnUnique *>(column.get());
+                if (!column_unique)
+                    throw Exception("Expected ColumnUnique for SerializeStateWithDictionaryPerGranule",
+                                    ErrorCodes::LOGICAL_ERROR);
+
+                auto & dictionary_keys = column_unique->getNestedColumn();
+
                 dictionary_type->serializeBinaryBulkWithMultipleStreams(
-                        *column, getter, 0, column->size(),
+                        *dictionary_keys, getter, 0, dictionary_keys->size(),
                         position_independent_encoding, path, state_per_granule->keys_state);
             }
             break;
@@ -224,8 +231,7 @@ void DataTypeWithDictionary::serializeBinaryBulkStateSuffix(
             throw Exception("Invalid KeysSerializationVersion for DataTypeWithDictionary", ErrorCodes::LOGICAL_ERROR);
     }
 
-    auto keys_state = dictionary_type->serializeBinaryBulkStateSuffix(
-            ser_state->keys_state, getter, path, position_independent_encoding);
+    dictionary_type->serializeBinaryBulkStateSuffix(ser_state->keys_state, getter, path, position_independent_encoding);
 }
 
 
@@ -344,10 +350,15 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
             sub_index = (*global_indexes->index(std::move(sub_index), 0)).mutate();
         }
         else
-            dict_per_granule_state->dictionary_keys = std::move(used_keys);
+        {
+            auto col = createColumn();
+            auto & col_with_dict = static_cast<ColumnWithDictionary &>(*col);
+            auto dictionary_keys = col_with_dict.getUniquePtr()->assumeMutable();
+            dict_per_granule_state->dictionary_keys = std::move(dictionary_keys);
+        }
 
-        UInt64 used_keys_size = used_keys->size();
-        writeIntBinary(used_keys_size, *stream);
+        auto & column_unique = static_cast<const IColumnUnique &>(*dict_per_granule_state->dictionary_keys);
+        auto & global_keys = column_unique.getNestedColumn();
 
         UInt64 indexes_size = sub_index->size();
         writeIntBinary(indexes_size, *stream);
@@ -355,16 +366,21 @@ void DataTypeWithDictionary::serializeBinaryBulkWithMultipleStreams(
         path.back() = Substream::DictionaryKeys;
 
         bool keys_was_written = false;
-        auto proxy_getter = [&getter](SubstreamPath stream_path) -> WriteBuffer *
+        auto proxy_getter = [&getter, &keys_was_written, dict_per_granule_state](SubstreamPath stream_path) -> WriteBuffer *
         {
             auto * buffer = getter(stream_path);
-            if (buffer)
+            if (buffer && !keys_was_written)
+            {
                 keys_was_written = true;
+
+                UInt64 dictionary_size = global_keys->size();
+                writeIntBinary(dictionary_size, *buffer);
+            }
 
             return buffer;
         };
 
-        dictionary_type->serializeBinaryBulkWithMultipleStreams(*dict_per_granule_state->dictionary_keys, proxy_getter, 0, 0,
+        dictionary_type->serializeBinaryBulkWithMultipleStreams(*global_keys, proxy_getter, 0, 0,
                                                                 position_independent_encoding, path, dict_state->keys_state);
         if (keys_was_written)
             dict_per_granule_state->dictionary_keys = nullptr;
@@ -503,7 +519,7 @@ void DataTypeWithDictionary::deserializeBinaryBulkToSingleColumn(
     indexes_type->deserializeBinaryBulk(*indexes, istr, limit, 0);
 
     auto idx = column_with_dictionary.getUnique()->uniqueInsertRangeFrom(*keys, 0, keys_size);
-    column_with_dictionary.getIndexes()->insertRangeFrom(*idx->index(indexes, 0), 0, indexes->size());
+    column_with_dictionary.getIndexes()->insertRangeFrom(*idx->index(ColumnPtr(std::move(indexes)), 0), 0, indexes->size());
 }
 
 void DataTypeWithDictionary::serializeBinary(const Field & field, WriteBuffer & ostr) const
