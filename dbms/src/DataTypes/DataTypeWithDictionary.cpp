@@ -214,7 +214,7 @@ void DataTypeWithDictionary::serializeBinaryBulkStateSuffix(
                                     ErrorCodes::LOGICAL_ERROR);
 
                 ColumnPtr column = std::move(state_per_granule->dictionary_keys);
-                auto * column_unique = typeid_cast<const ColumnUnique *>(column.get());
+                auto * column_unique = typeid_cast<const IColumnUnique *>(column.get());
                 if (!column_unique)
                     throw Exception("Expected ColumnUnique for SerializeStateWithDictionaryPerGranule",
                                     ErrorCodes::LOGICAL_ERROR);
