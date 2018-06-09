@@ -282,7 +282,7 @@ void DataTypeTuple::deserializeTextCSV(IColumn & column, ReadBuffer & istr, cons
     });
 }
 
-void DataTypeTuple::enumerateStreams(StreamCallback callback, SubstreamPath path) const
+void DataTypeTuple::enumerateStreams(const StreamCallback & callback, SubstreamPath & path) const
 {
     path.push_back(Substream::TupleElement);
     for (const auto i : ext::range(0, ext::size(elems)))
@@ -290,6 +290,7 @@ void DataTypeTuple::enumerateStreams(StreamCallback callback, SubstreamPath path
         path.back().tuple_element_name = names[i];
         elems[i]->enumerateStreams(callback, path);
     }
+    path.pop_back();
 }
 
 struct SerializeBinaryBulkStateTuple : public IDataType::SerializeBinaryBulkState
@@ -302,136 +303,110 @@ struct DeserializeBinaryBulkStateTuple : public IDataType::DeserializeBinaryBulk
     std::vector<IDataType::DeserializeBinaryBulkStatePtr> states;
 };
 
-IDataType::SerializeBinaryBulkStatePtr
-DataTypeTuple::serializeBinaryBulkStatePrefix(OutputStreamGetter getter, SubstreamPath path) const
+static SerializeBinaryBulkStateTuple * checkAndGetTupleSerializeState(IDataType::SerializeBinaryBulkStatePtr & state)
 {
-    auto state = std::make_shared<SerializeBinaryBulkStateTuple>();
+    if (!state)
+        throw Exception("Got empty state for DataTypeTuple.", ErrorCodes::LOGICAL_ERROR);
 
-    state->states.reserve(elems.size());
-    path.push_back(Substream::TupleElement);
-    for (size_t i = 0; i < elems.size(); ++i)
-    {
-        path.back().tuple_element_name = names[i];
-        state->states.emplace_back(elems[i]->serializeBinaryBulkStatePrefix(getter, path));
-    }
+    auto * tuple_state = typeid_cast<SerializeBinaryBulkStateTuple *>(state.get());
+    if (!tuple_state)
+        throw Exception("Invalid SerializeBinaryBulkState for DataTypeTuple. Expected: "
+                        + demangle(typeid(SerializeBinaryBulkStateTuple).name()) + ", got "
+                        + demangle(typeid(*state).name()), ErrorCodes::LOGICAL_ERROR);
 
-    return state;
+    return tuple_state;
 }
 
+static DeserializeBinaryBulkStateTuple * checkAndGetTupleDeserializeState(IDataType::DeserializeBinaryBulkStatePtr & state)
+{
+    if (!state)
+        throw Exception("Got empty state for DataTypeTuple.", ErrorCodes::LOGICAL_ERROR);
+
+    auto * tuple_state = typeid_cast<DeserializeBinaryBulkStateTuple *>(state.get());
+    if (!tuple_state)
+        throw Exception("Invalid DeserializeBinaryBulkState for DataTypeTuple. Expected: "
+                        + demangle(typeid(DeserializeBinaryBulkStateTuple).name()) + ", got "
+                        + demangle(typeid(*state).name()), ErrorCodes::LOGICAL_ERROR);
+
+    return tuple_state;
+}
 
 void DataTypeTuple::serializeBinaryBulkStateSuffix(
-    const SerializeBinaryBulkStatePtr & state,
-    OutputStreamGetter getter,
-    SubstreamPath path,
-    bool position_independent_encoding) const
+    SerializeBinaryBulkSettings & settings,
+    SerializeBinaryBulkStatePtr & state) const
 {
-    auto * tuple_state = typeid_cast<SerializeBinaryBulkStateTuple *>(state.get());
-    path.push_back(Substream::TupleElement);
+    auto * tuple_state = checkAndGetTupleSerializeState(state);
+
+    settings.path.push_back(Substream::TupleElement);
     for (size_t i = 0; i < elems.size(); ++i)
     {
-        path.back().tuple_element_name = names[i];
-        elems[i]->serializeBinaryBulkStateSuffix(tuple_state->states[i], getter, path, position_independent_encoding);
+        settings.path.back().tuple_element_name = names[i];
+        elems[i]->serializeBinaryBulkStatePrefix(settings, state->states[i]);
     }
+    settings.path.pop_back();
 }
 
-
-IDataType::DeserializeBinaryBulkStatePtr
-DataTypeTuple::deserializeBinaryBulkStatePrefix(InputStreamGetter getter, SubstreamPath path) const
+void DataTypeTuple::deserializeBinaryBulkStatePrefix(
+        DeserializeBinaryBulkSettings & settings,
+        DeserializeBinaryBulkStatePtr & state) const
 {
-    auto state = std::make_shared<DeserializeBinaryBulkStateTuple>();
+    auto tuple_state = std::make_shared<DeserializeBinaryBulkStateTuple>();
+    tuple_state->states.resize(elems.size());
 
-    state->states.reserve(elems.size());
-    path.push_back(Substream::TupleElement);
+    settings.path.push_back(Substream::TupleElement);
     for (size_t i = 0; i < elems.size(); ++i)
     {
-        path.back().tuple_element_name = names[i];
-        state->states.emplace_back(elems[i]->deserializeBinaryBulkStatePrefix(getter, path));
+        settings.path.back().tuple_element_name = names[i];
+        elems[i]->deserializeBinaryBulkStatePrefix(settings, tuple_state->states[i]);
     }
+    settings.path.pop_back();
 
-    return state;
+    state = std::move(tuple_state);
 }
-
-
-void DataTypeTuple::deserializeBinaryBulkStateSuffix(const DeserializeBinaryBulkStatePtr & state) const
-{
-    auto * tuple_state = typeid_cast<DeserializeBinaryBulkStateTuple *>(state.get());
-    for (size_t i = 0; i < elems.size(); ++i)
-        elems[i]->deserializeBinaryBulkStateSuffix(tuple_state->states[i]);
-}
-
 
 void DataTypeTuple::serializeBinaryBulkWithMultipleStreams(
     const IColumn & column,
-    OutputStreamGetter getter,
     size_t offset,
     size_t limit,
-    bool position_independent_encoding,
-    SubstreamPath path,
-    const SerializeBinaryBulkStatePtr & state) const
+    SerializeBinaryBulkSettings & settings,
+    SerializeBinaryBulkStatePtr & state) const
 {
-    auto * tuple_state = typeid_cast<SerializeBinaryBulkStateTuple *>(state.get());
+    if (!state)
+    {
+        auto tuple_state = std::make_shared<SerializeBinaryBulkStateTuple>();
+        tuple_state->states.resize(elems.size());
+        state = std::move(tuple_state);
+    }
 
-    path.push_back(Substream::TupleElement);
+    auto * tuple_state = checkAndGetTupleSerializeState(state);
+
+    settings.path.push_back(Substream::TupleElement);
     for (const auto i : ext::range(0, ext::size(elems)))
     {
-        path.back().tuple_element_name = names[i];
-        elems[i]->serializeBinaryBulkWithMultipleStreams(
-            extractElementColumn(column, i), getter, offset, limit,
-            position_independent_encoding, path, tuple_state->states[i]);
+        settings.path.back().tuple_element_name = names[i];
+        auto & element_col = extractElementColumn(column, i);
+        elems[i]->serializeBinaryBulkWithMultipleStreams(element_col, offset, limit, settings, tuple_state->states[i]);
     }
+    settings.path.pop_back();
 }
 
 void DataTypeTuple::deserializeBinaryBulkWithMultipleStreams(
     IColumn & column,
-    InputStreamGetter getter,
     size_t limit,
-    double avg_value_size_hint,
-    bool position_independent_encoding,
-    SubstreamPath path,
-    const DeserializeBinaryBulkStatePtr & state) const
+    DeserializeBinaryBulkSettings & settings,
+    DeserializeBinaryBulkStatePtr & state) const
 {
-    auto * tuple_state = typeid_cast<DeserializeBinaryBulkStateTuple *>(state.get());
+    auto * tuple_state = checkAndGetTupleDeserializeState(state);
 
-    path.push_back(Substream::TupleElement);
+    settings.path.push_back(Substream::TupleElement);
     for (const auto i : ext::range(0, ext::size(elems)))
     {
-        path.back().tuple_element_name = names[i];
-        elems[i]->deserializeBinaryBulkWithMultipleStreams(
-                extractElementColumn(column, i), getter, limit, avg_value_size_hint,
-                position_independent_encoding, path, tuple_state->states[i]);
+        settings.path.back().tuple_element_name = names[i];
+        auto & element_col = extractElementColumn(column, i);
+        elems[i]->deserializeBinaryBulkWithMultipleStreams(element_col, limit, settings, tuple_state->states[i]);
     }
+    settings.path.pop_back();
 }
-
-
-void DataTypeTuple::serializeBinaryBulkFromSingleColumn(
-    const IColumn & column,
-    WriteBuffer & ostr,
-    size_t offset,
-    size_t limit,
-    bool position_independent_encoding) const
-{
-    for (const auto i : ext::range(0, ext::size(elems)))
-    {
-        elems[i]->serializeBinaryBulkFromSingleColumn(
-                extractElementColumn(column, i), ostr, offset, limit, position_independent_encoding);
-    }
-}
-
-
-void DataTypeTuple::deserializeBinaryBulkToSingleColumn(
-    IColumn & column,
-    ReadBuffer & istr,
-    size_t limit,
-    double avg_value_size_hint,
-    bool position_independent_encoding) const
-{
-    for (const auto i : ext::range(0, ext::size(elems)))
-    {
-        elems[i]->deserializeBinaryBulkToSingleColumn(
-                extractElementColumn(column, i), istr, limit, avg_value_size_hint, position_independent_encoding);
-    }
-}
-
 
 MutableColumnPtr DataTypeTuple::createColumn() const
 {

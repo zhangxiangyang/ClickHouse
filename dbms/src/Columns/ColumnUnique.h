@@ -64,10 +64,11 @@ public:
     const ColumnPtr & getNestedColumn() const override;
     size_t uniqueInsert(const Field & x) override;
     size_t uniqueInsertFrom(const IColumn & src, size_t n) override;
-    ColumnPtr uniqueInsertRangeFrom(const IColumn & src, size_t start, size_t length) override;
+    ColumnPtr uniqueInsertRangeFrom(const IColumn & src, size_t start, size_t length, size_t max_dictionary_size) override;
     size_t uniqueInsertData(const char * pos, size_t length) override;
     size_t uniqueInsertDataWithTerminatingZero(const char * pos, size_t length) override;
     size_t uniqueDeserializeAndInsertFromArena(const char * pos, const char *& new_pos) override;
+    SerializableState getSerializableState() const override;
 
     size_t getDefaultValueIndex() const override { return is_nullable ? 1 : 0; }
     size_t getNullValueIndex() const override;
@@ -330,7 +331,7 @@ size_t ColumnUnique<ColumnType, IndexType>::uniqueDeserializeAndInsertFromArena(
 }
 
 template <typename ColumnType, typename IndexType>
-ColumnPtr ColumnUnique<ColumnType, IndexType>::uniqueInsertRangeFrom(const IColumn & src, size_t start, size_t length)
+ColumnPtr ColumnUnique<ColumnType, IndexType>::uniqueInsertRangeFrom(const IColumn & src, size_t start, size_t length, size_t max_dictionary_size)
 {
     if (!index)
         buildIndex();
@@ -366,10 +367,14 @@ ColumnPtr ColumnUnique<ColumnType, IndexType>::uniqueInsertRangeFrom(const IColu
             if (it == index->end())
             {
                 positions[i] = next_position;
-                auto ref = src_column->getDataAt(row);
-                column->insertData(ref.data, ref.size);
-                (*index)[StringRefWrapper<ColumnType>(column, next_position)] = next_position;
-                ++next_position;
+
+                if (max_dictionary_size == 0 || next_position < max_dictionary_size + numSpecialValues())
+                {
+                    auto ref = src_column->getDataAt(row);
+                    column->insertData(ref.data, ref.size);
+                    (*index)[StringRefWrapper<ColumnType>(column, next_position)] = next_position;
+                    ++next_position;
+                }
             }
             else
                 positions[i] = it->second;
@@ -379,4 +384,15 @@ ColumnPtr ColumnUnique<ColumnType, IndexType>::uniqueInsertRangeFrom(const IColu
     return positions_column;
 }
 
+template <typename ColumnType, typename IndexType>
+IColumnUnique::SerializableState ColumnUnique<ColumnType, IndexType>::getSerializableState() const
+{
+    SerializableState state;
+    state.column = column_holder;
+    state.offset = numSpecialValues();
+    state.limit = column_holder->size() - state.offset;
+
+    return state;
 }
+
+};

@@ -144,71 +144,57 @@ namespace
 }
 
 
-void DataTypeArray::enumerateStreams(StreamCallback callback, SubstreamPath path) const
+void DataTypeArray::enumerateStreams(const StreamCallback & callback, SubstreamPath & path) const
 {
     path.push_back(Substream::ArraySizes);
     callback(path);
     path.back() = Substream::ArrayElements;
     nested->enumerateStreams(callback, path);
-}
-
-
-IDataType::SerializeBinaryBulkStatePtr
-DataTypeArray::serializeBinaryBulkStatePrefix(OutputStreamGetter getter, SubstreamPath path) const
-{
-    path.push_back(Substream::ArrayElements);
-    return nested->serializeBinaryBulkStatePrefix(getter, path);
+    path.pop_back();
 }
 
 
 void DataTypeArray::serializeBinaryBulkStateSuffix(
-    const SerializeBinaryBulkStatePtr & state,
-    OutputStreamGetter getter,
-    SubstreamPath path,
-    bool position_independent_encoding) const
+    SerializeBinaryBulkSettings & settings,
+    SerializeBinaryBulkStatePtr & state) const
 {
-    path.push_back(Substream::ArrayElements);
-    nested->serializeBinaryBulkStateSuffix(state, getter, path, position_independent_encoding);
+    settings.path.push_back(Substream::ArrayElements);
+    nested->serializeBinaryBulkStateSuffix(settings, state);
+    settings.path.pop_back();
 }
 
 
-IDataType::DeserializeBinaryBulkStatePtr
-DataTypeArray::deserializeBinaryBulkStatePrefix(InputStreamGetter getter, SubstreamPath path) const
+void DataTypeArray::deserializeBinaryBulkStatePrefix(
+    DeserializeBinaryBulkSettings & settings,
+    DeserializeBinaryBulkStatePtr & state) const
 {
-    path.push_back(Substream::ArrayElements);
-    return nested->deserializeBinaryBulkStatePrefix(getter, path);
-}
-
-
-void DataTypeArray::deserializeBinaryBulkStateSuffix(const DeserializeBinaryBulkStatePtr & state) const
-{
-    nested->deserializeBinaryBulkStateSuffix(state);
+    settings.path.push_back(Substream::ArrayElements);
+    nested->deserializeBinaryBulkStatePrefix(settings, state);
+    settings.path.pop_back();
 }
 
 
 void DataTypeArray::serializeBinaryBulkWithMultipleStreams(
     const IColumn & column,
-    OutputStreamGetter getter,
     size_t offset,
     size_t limit,
-    bool position_independent_encoding,
-    SubstreamPath path,
-    const SerializeBinaryBulkStatePtr & state) const
+    SerializeBinaryBulkSettings & settings,
+    SerializeBinaryBulkStatePtr & state) const
 {
     const ColumnArray & column_array = typeid_cast<const ColumnArray &>(column);
 
     /// First serialize array sizes.
-    path.push_back(Substream::ArraySizes);
-    if (auto stream = getter(path))
+    settings.path.push_back(Substream::ArraySizes);
+    if (auto stream = settings.getter(settings.path))
     {
-        if (position_independent_encoding)
+        if (settings.position_independent_encoding)
             serializeArraySizesPositionIndependent(column, *stream, offset, limit);
         else
             DataTypeNumber<ColumnArray::Offset>().serializeBinaryBulk(*column_array.getOffsetsPtr(), *stream, offset, limit);
     }
 
     /// Then serialize contents of arrays.
-    path.back() = Substream::ArrayElements;
+    settings.path.back() = Substream::ArrayElements;
     const ColumnArray::Offsets & offset_values = column_array.getOffsets();
 
     if (offset > offset_values.size())
@@ -230,31 +216,29 @@ void DataTypeArray::serializeBinaryBulkWithMultipleStreams(
         : 0;
 
     if (limit == 0 || nested_limit)
-        nested->serializeBinaryBulkWithMultipleStreams(column_array.getData(), getter, nested_offset, nested_limit, position_independent_encoding, path, state);
+        nested->serializeBinaryBulkWithMultipleStreams(column_array.getData(), nested_offset, nested_limit, settings, state);
+    settings.path.pop_back();
 }
 
 
 void DataTypeArray::deserializeBinaryBulkWithMultipleStreams(
     IColumn & column,
-    InputStreamGetter getter,
     size_t limit,
-    double /*avg_value_size_hint*/,
-    bool position_independent_encoding,
-    SubstreamPath path,
-    const DeserializeBinaryBulkStatePtr & state) const
+    DeserializeBinaryBulkSettings & settings,
+    DeserializeBinaryBulkStatePtr & state) const
 {
     ColumnArray & column_array = typeid_cast<ColumnArray &>(column);
 
-    path.push_back(Substream::ArraySizes);
-    if (auto stream = getter(path))
+    settings.path.push_back(Substream::ArraySizes);
+    if (auto stream = settings.getter(settings.path))
     {
-        if (position_independent_encoding)
+        if (settings.position_independent_encoding)
             deserializeArraySizesPositionIndependent(column, *stream, limit);
         else
             DataTypeNumber<ColumnArray::Offset>().deserializeBinaryBulk(column_array.getOffsetsColumn(), *stream, limit, 0);
     }
 
-    path.back() = Substream::ArrayElements;
+    settings.path.back() = Substream::ArrayElements;
 
     ColumnArray::Offsets & offset_values = column_array.getOffsets();
     IColumn & nested_column = column_array.getData();
@@ -264,84 +248,14 @@ void DataTypeArray::deserializeBinaryBulkWithMultipleStreams(
     if (last_offset < nested_column.size())
         throw Exception("Nested column is longer than last offset", ErrorCodes::LOGICAL_ERROR);
     size_t nested_limit = last_offset - nested_column.size();
-    nested->deserializeBinaryBulkWithMultipleStreams(nested_column, getter, nested_limit, 0, position_independent_encoding, path, state);
+    nested->deserializeBinaryBulkWithMultipleStreams(nested_column, nested_limit, settings, state);
+    settings.path.pop_back();
 
     /// Check consistency between offsets and elements subcolumns.
     /// But if elements column is empty - it's ok for columns of Nested types that was added by ALTER.
     if (!nested_column.empty() && nested_column.size() != last_offset)
         throw Exception("Cannot read all array values: read just " + toString(nested_column.size()) + " of " + toString(last_offset),
             ErrorCodes::CANNOT_READ_ALL_DATA);
-}
-
-
-void DataTypeArray::serializeBinaryBulkFromSingleColumn(
-    const IColumn & column,
-    WriteBuffer & ostr,
-    size_t offset,
-    size_t limit,
-    bool position_independent_encoding) const
-{
-    const ColumnArray & column_array = typeid_cast<const ColumnArray &>(column);
-
-        if (position_independent_encoding)
-            serializeArraySizesPositionIndependent(column, ostr, offset, limit);
-        else
-            DataTypeNumber<ColumnArray::Offset>().serializeBinaryBulk(*column_array.getOffsetsPtr(), ostr, offset, limit);
-
-    const ColumnArray::Offsets & offset_values = column_array.getOffsets();
-
-    if (offset > offset_values.size())
-        return;
-
-    /** offset - from which array to write.
-      * limit - how many arrays should be written, or 0, if you write everything that is.
-      * end - up to which array the recorded piece ends.
-      *
-      * nested_offset - from which element of the innards to write.
-      * nested_limit - how many elements of the innards to write, or 0, if you write everything that is.
-      */
-
-    size_t end = std::min(offset + limit, offset_values.size());
-
-    size_t nested_offset = offset ? offset_values[offset - 1] : 0;
-    size_t nested_limit = limit
-                          ? offset_values[end - 1] - nested_offset
-                          : 0;
-
-    if (limit == 0 || nested_limit)
-        nested->serializeBinaryBulkFromSingleColumn(column_array.getData(), ostr, nested_offset, nested_limit, position_independent_encoding);
-}
-
-
-void DataTypeArray::deserializeBinaryBulkToSingleColumn(
-    IColumn & column,
-    ReadBuffer & istr,
-    size_t limit,
-    double /*avg_value_size_hint*/,
-    bool position_independent_encoding) const
-{
-    ColumnArray & column_array = typeid_cast<ColumnArray &>(column);
-
-    if (position_independent_encoding)
-        deserializeArraySizesPositionIndependent(column, istr, limit);
-    else
-        DataTypeNumber<ColumnArray::Offset>().deserializeBinaryBulk(column_array.getOffsetsColumn(), istr, limit, 0);
-
-    ColumnArray::Offsets & offset_values = column_array.getOffsets();
-    IColumn & nested_column = column_array.getData();
-
-    /// Number of values corresponding with `offset_values` must be read.
-    size_t last_offset = (offset_values.empty() ? 0 : offset_values.back());
-    if (last_offset < nested_column.size())
-        throw Exception("Nested column is longer than last offset", ErrorCodes::LOGICAL_ERROR);
-    size_t nested_limit = last_offset - nested_column.size();
-    nested->deserializeBinaryBulkToSingleColumn(nested_column, istr, nested_limit, 0, position_independent_encoding);
-
-    /// Check consistency between offsets and elements subcolumns.
-    /// But if elements column is empty - it's ok for columns of Nested types that was added by ALTER.
-    if (!nested_column.empty() && nested_column.size() != last_offset)
-        throw Exception("Cannot read all array values: read just " + toString(nested_column.size()) + " of " + toString(last_offset),
-                        ErrorCodes::CANNOT_READ_ALL_DATA);
 }
 
 
