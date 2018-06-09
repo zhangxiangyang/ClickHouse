@@ -159,7 +159,7 @@ private:
 
     using WrittenStreams = std::set<std::string>;
 
-    IDataType::OutputStreamGetter createStreamGetter(const String & name, WrittenStreams & written_streams) const;
+    IDataType::OutputStreamGetter createStreamGetter(const String & name, WrittenStreams & written_streams);
     void writeData(const String & name, const IDataType & type, const IColumn & column, WrittenStreams & written_streams);
 };
 
@@ -233,7 +233,7 @@ void TinyLogBlockInputStream::readData(const String & name, const IDataType & ty
 
 
 IDataType::OutputStreamGetter TinyLogBlockOutputStream::createStreamGetter(const String & name,
-                                                                           WrittenStreams & written_streams) const
+                                                                           WrittenStreams & written_streams)
 {
     return [&] (const IDataType::SubstreamPath & path) -> WriteBuffer *
     {

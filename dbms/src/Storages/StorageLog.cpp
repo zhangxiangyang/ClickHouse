@@ -176,7 +176,7 @@ private:
     using SerializeStates = std::map<String, SerializeState>;
     SerializeStates serialize_states;
 
-    IDataType::OutputStreamGetter createStreamGetter(const String & name, WrittenStreams & written_streams) const;
+    IDataType::OutputStreamGetter createStreamGetter(const String & name, WrittenStreams & written_streams);
 
     void writeData(const String & name, const IDataType & type, const IColumn & column,
         MarksForColumns & out_marks,
@@ -316,7 +316,7 @@ void LogBlockOutputStream::writeSuffix()
 
 
 IDataType::OutputStreamGetter LogBlockOutputStream::createStreamGetter(const String & name,
-                                                                       WrittenStreams & written_streams) const
+                                                                       WrittenStreams & written_streams)
 {
     return [&] (const IDataType::SubstreamPath & path) -> WriteBuffer *
     {
