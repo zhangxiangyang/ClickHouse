@@ -9,38 +9,36 @@
 namespace DB
 {
 
-String ASTFunction::getColumnNameImpl() const
+void ASTFunction::appendColumnNameImpl(WriteBuffer & ostr) const
 {
-    WriteBufferFromOwnString wb;
-    writeString(name, wb);
+    writeString(name, ostr);
 
     if (parameters)
     {
-        writeChar('(', wb);
-        for (ASTs::const_iterator it = parameters->children.begin(); it != parameters->children.end(); ++it)
+        writeChar('(', ostr);
+        for (auto it = parameters->children.begin(); it != parameters->children.end(); ++it)
         {
             if (it != parameters->children.begin())
-                writeCString(", ", wb);
-            writeString((*it)->getColumnName(), wb);
+                writeCString(", ", ostr);
+            (*it)->appendColumnName(ostr);
         }
-        writeChar(')', wb);
+        writeChar(')', ostr);
     }
 
-    writeChar('(', wb);
-    for (ASTs::const_iterator it = arguments->children.begin(); it != arguments->children.end(); ++it)
+    writeChar('(', ostr);
+    for (auto it = arguments->children.begin(); it != arguments->children.end(); ++it)
     {
         if (it != arguments->children.begin())
-            writeCString(", ", wb);
-        writeString((*it)->getColumnName(), wb);
+            writeCString(", ", ostr);
+        (*it)->appendColumnName(ostr);
     }
-    writeChar(')', wb);
-    return wb.str();
+    writeChar(')', ostr);
 }
 
 /** Get the text that identifies this element. */
-String ASTFunction::getID() const
+String ASTFunction::getID(char delim) const
 {
-    return "Function_" + name;
+    return "Function" + (delim + name);
 }
 
 ASTPtr ASTFunction::clone() const

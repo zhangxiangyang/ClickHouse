@@ -61,14 +61,14 @@ namespace ZeroTraits \
  \
     template <> \
     inline void set<STRUCT>(STRUCT & x) { x.data = nullptr; } \
-}; \
+} \
  \
 template <> \
 struct DefaultHash<STRUCT> \
 { \
     size_t operator() (STRUCT x) const \
     { \
-        return CityHash_v1_0_2::CityHash64(x.data, x.size);  \
+        return CityHash_v1_0_2::CityHash64(x.data, x.size); \
     } \
 };
 
@@ -319,7 +319,7 @@ struct FarmHash64
 {
     size_t operator() (StringRef x) const
     {
-        return farmhash::Hash64(x.data, x.size);
+        return NAMESPACE_FOR_HASH_FUNCTIONS::Hash64(x.data, x.size);
     }
 };
 

@@ -1,11 +1,11 @@
 #include <Storages/MutationCommands.h>
-#include <Storages/IStorage.h>
-#include <Interpreters/ExpressionAnalyzer.h>
-#include <Columns/FilterDescription.h>
 #include <IO/Operators.h>
-#include <Parsers/ExpressionListParsers.h>
 #include <Parsers/formatAST.h>
+#include <Parsers/ExpressionListParsers.h>
+#include <Parsers/ParserAlterQuery.h>
 #include <Parsers/parseQuery.h>
+#include <Parsers/ASTAssignment.h>
+#include <Common/typeid_cast.h>
 
 
 namespace DB
@@ -14,100 +14,69 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int UNKNOWN_MUTATION_COMMAND;
+    extern const int MULTIPLE_ASSIGNMENTS_TO_COLUMN;
 }
 
-static String typeToString(MutationCommand::Type type)
+std::optional<MutationCommand> MutationCommand::parse(ASTAlterCommand * command)
 {
-    switch (type)
+    if (command->type == ASTAlterCommand::DELETE)
     {
-        case MutationCommand::DELETE:     return "DELETE";
-        default:
-            throw Exception("Bad mutation type: " + toString<int>(type), ErrorCodes::LOGICAL_ERROR);
+        MutationCommand res;
+        res.ast = command->ptr();
+        res.type = DELETE;
+        res.predicate = command->predicate;
+        return res;
     }
-}
-
-void MutationCommand::writeText(WriteBuffer & out) const
-{
-    out << typeToString(type) << "\n";
-
-    switch (type)
+    else if (command->type == ASTAlterCommand::UPDATE)
     {
-    case  MutationCommand::DELETE:
+        MutationCommand res;
+        res.ast = command->ptr();
+        res.type = UPDATE;
+        res.predicate = command->predicate;
+        for (const ASTPtr & assignment_ast : command->update_assignments->children)
         {
-            std::stringstream ss;
-            formatAST(*predicate, ss, /* hilite = */ false, /* one_line = */ true);
-            out << "predicate: " << escape << ss.str() << "\n";
-            break;
+            const auto & assignment = typeid_cast<const ASTAssignment &>(*assignment_ast);
+            auto insertion = res.column_to_update_expression.emplace(assignment.column_name, assignment.expression);
+            if (!insertion.second)
+                throw Exception("Multiple assignments in the single statement to column `" + assignment.column_name + "`",
+                    ErrorCodes::MULTIPLE_ASSIGNMENTS_TO_COLUMN);
         }
-        default:
-            throw Exception("Bad mutation type: " + toString<int>(type), ErrorCodes::LOGICAL_ERROR);
-    }
-}
-
-void MutationCommand::readText(ReadBuffer & in)
-{
-    String type_str;
-    in >> type_str >> "\n";
-
-    if (type_str == "DELETE")
-    {
-        type = DELETE;
-
-        String predicate_str;
-        in >> "predicate: " >> escape >> predicate_str >> "\n";
-        ParserExpressionWithOptionalAlias p_expr(false);
-        predicate = parseQuery(
-            p_expr, predicate_str.data(), predicate_str.data() + predicate_str.length(), "mutation predicate", 0);
+        return res;
     }
     else
-        throw Exception("Unknown mutation command: `" + type_str + "'", ErrorCodes::UNKNOWN_MUTATION_COMMAND);
+        return {};
 }
 
 
-void MutationCommands::validate(const IStorage & table, const Context & context)
+std::shared_ptr<ASTAlterCommandList> MutationCommands::ast() const
 {
-    auto all_columns = table.getColumns().getAll();
-
-    for (const MutationCommand & command : commands)
-    {
-        switch (command.type)
-        {
-            case MutationCommand::DELETE:
-            {
-                auto actions = ExpressionAnalyzer(command.predicate, context, {}, all_columns).getActions(true);
-                const ColumnWithTypeAndName & predicate_column = actions->getSampleBlock().getByName(
-                    command.predicate->getColumnName());
-                checkColumnCanBeUsedAsFilter(predicate_column);
-                break;
-            }
-            default:
-                throw Exception("Bad mutation type: " + toString<int>(command.type), ErrorCodes::LOGICAL_ERROR);
-        }
-    }
+    auto res = std::make_shared<ASTAlterCommandList>();
+    for (const MutationCommand & command : *this)
+        res->add(command.ast->clone());
+    return res;
 }
 
 void MutationCommands::writeText(WriteBuffer & out) const
 {
-    out << "format version: 1\n"
-        << "count: " << commands.size() << "\n";
-    for (const MutationCommand & command : commands)
-    {
-        command.writeText(out);
-    }
+    std::stringstream commands_ss;
+    formatAST(*ast(), commands_ss, /* hilite = */ false, /* one_line = */ true);
+    out << escape << commands_ss.str();
 }
 
 void MutationCommands::readText(ReadBuffer & in)
 {
-    in >> "format version: 1\n";
+    String commands_str;
+    in >> escape >> commands_str;
 
-    size_t count;
-    in >> "count: " >> count >> "\n";
-
-    for (size_t i = 0; i < count; ++i)
+    ParserAlterCommandList p_alter_commands;
+    auto commands_ast = parseQuery(
+        p_alter_commands, commands_str.data(), commands_str.data() + commands_str.length(), "mutation commands list", 0);
+    for (ASTAlterCommand * command_ast : typeid_cast<const ASTAlterCommandList &>(*commands_ast).commands)
     {
-        MutationCommand command;
-        command.readText(in);
-        commands.push_back(std::move(command));
+        auto command = MutationCommand::parse(command_ast);
+        if (!command)
+            throw Exception("Unknown mutation command type: " + DB::toString<int>(command_ast->type), ErrorCodes::UNKNOWN_MUTATION_COMMAND);
+        push_back(std::move(*command));
     }
 }
 

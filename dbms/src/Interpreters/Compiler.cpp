@@ -10,8 +10,10 @@
 #include <IO/ReadBufferFromFileDescriptor.h>
 #include <IO/WriteBufferFromFile.h>
 #include <Interpreters/Compiler.h>
-#include <Interpreters/config_compile.h>
 
+#if __has_include(<Interpreters/config_compile.h>)
+#include <Interpreters/config_compile.h>
+#endif
 
 namespace ProfileEvents
 {
@@ -25,6 +27,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int CANNOT_DLOPEN;
+    extern const int CANNOT_COMPILE_CODE;
 }
 
 Compiler::Compiler(const std::string & path_, size_t threads)
@@ -202,6 +205,9 @@ void Compiler::compile(
 {
     ProfileEvents::increment(ProfileEvents::CompileAttempt);
 
+#if !defined(INTERNAL_COMPILER_EXECUTABLE)
+    throw Exception("Cannot compile code: Compiler disabled", ErrorCodes::CANNOT_COMPILE_CODE);
+#else
     std::string prefix = path + "/" + file_name;
     std::string cpp_file_path = prefix + ".cpp";
     std::string so_file_path = prefix + ".so";
@@ -216,9 +222,9 @@ void Compiler::compile(
 
     std::stringstream command;
 
-    auto compiler_executable_root =  Poco::Util::Application::instance().config().getString("compiler_executable_root", INTERNAL_COMPILER_BIN_ROOT);
-    auto compiler_headers =  Poco::Util::Application::instance().config().getString("compiler_headers", INTERNAL_COMPILER_HEADERS);
-    auto compiler_headers_root =  Poco::Util::Application::instance().config().getString("compiler_headers_root", INTERNAL_COMPILER_HEADERS_ROOT);
+    auto compiler_executable_root = Poco::Util::Application::instance().config().getString("compiler_executable_root", INTERNAL_COMPILER_BIN_ROOT);
+    auto compiler_headers = Poco::Util::Application::instance().config().getString("compiler_headers", INTERNAL_COMPILER_HEADERS);
+    auto compiler_headers_root = Poco::Util::Application::instance().config().getString("compiler_headers_root", INTERNAL_COMPILER_HEADERS_ROOT);
     LOG_DEBUG(log, "Using internal compiler: compiler_executable_root=" << compiler_executable_root << "; compiler_headers_root=" << compiler_headers_root << "; compiler_headers=" << compiler_headers);
 
     /// Slightly unconvenient.
@@ -230,7 +236,7 @@ void Compiler::compile(
             /// It is hard to correctly call a ld program manually, because it is easy to skip critical flags, which might lead to
             /// unhandled exceptions. Therefore pass path to llvm's lld directly to clang.
             " -fuse-ld=" << compiler_executable_root << INTERNAL_LINKER_EXECUTABLE
-
+            " -fdiagnostics-color=never"
 
     #if INTERNAL_COMPILER_CUSTOM_ROOT
             /// To get correct order merge this results carefully:
@@ -238,23 +244,29 @@ void Compiler::compile(
             /// echo | g++ -x c++ -E -Wp,-v -
 
             " -isystem " << compiler_headers_root << "/usr/include/c++/*"
+        #if defined(CMAKE_LIBRARY_ARCHITECTURE)
             " -isystem " << compiler_headers_root << "/usr/include/" CMAKE_LIBRARY_ARCHITECTURE "/c++/*"
+        #endif
             " -isystem " << compiler_headers_root << "/usr/include/c++/*/backward"
             " -isystem " << compiler_headers_root << "/usr/include/clang/*/include"                  /// if compiler is clang (from package)
             " -isystem " << compiler_headers_root << "/usr/local/lib/clang/*/include"                /// if clang installed manually
             " -isystem " << compiler_headers_root << "/usr/lib/clang/*/include"                      /// if clang build from submodules
+        #if defined(CMAKE_LIBRARY_ARCHITECTURE)
             " -isystem " << compiler_headers_root << "/usr/lib/gcc/" CMAKE_LIBRARY_ARCHITECTURE "/*/include-fixed"
             " -isystem " << compiler_headers_root << "/usr/lib/gcc/" CMAKE_LIBRARY_ARCHITECTURE "/*/include"
+        #endif
             " -isystem " << compiler_headers_root << "/usr/local/include"                            /// if something installed manually
+        #if defined(CMAKE_LIBRARY_ARCHITECTURE)
             " -isystem " << compiler_headers_root << "/usr/include/" CMAKE_LIBRARY_ARCHITECTURE
+        #endif
             " -isystem " << compiler_headers_root << "/usr/include"
     #endif
             " -I " << compiler_headers << "/dbms/src/"
-            " -I " << compiler_headers << "/contrib/libcityhash/include/"
-            " -I " << compiler_headers << "/contrib/libpcg-random/include/"
-            " -I " << compiler_headers << INTERNAL_DOUBLE_CONVERSION_INCLUDE_DIR
-            " -I " << compiler_headers << INTERNAL_Poco_Foundation_INCLUDE_DIR
-            " -I " << compiler_headers << INTERNAL_Boost_INCLUDE_DIRS
+            " -isystem " << compiler_headers << "/contrib/cityhash102/include/"
+            " -isystem " << compiler_headers << "/contrib/libpcg-random/include/"
+            " -isystem " << compiler_headers << INTERNAL_DOUBLE_CONVERSION_INCLUDE_DIR
+            " -isystem " << compiler_headers << INTERNAL_Poco_Foundation_INCLUDE_DIR
+            " -isystem " << compiler_headers << INTERNAL_Boost_INCLUDE_DIRS
             " -I " << compiler_headers << "/libs/libcommon/include/"
             " " << additional_compiler_flags <<
             " -shared -o " << so_tmp_file_path << " " << cpp_file_path
@@ -274,7 +286,18 @@ void Compiler::compile(
     }
 
     if (!compile_result.empty())
-        throw Exception("Cannot compile code:\n\n" + command.str() + "\n\n" + compile_result);
+    {
+        std::string error_message = "Cannot compile code:\n\n" + command.str() + "\n\n" + compile_result;
+
+        Poco::File so_tmp_file(so_tmp_file_path);
+        if (so_tmp_file.exists() && so_tmp_file.canExecute())
+        {
+            /// Compiler may emit information messages. This is suspicious, but we still can use compiled result.
+            LOG_WARNING(log, error_message);
+        }
+        else
+            throw Exception(error_message, ErrorCodes::CANNOT_COMPILE_CODE);
+    }
 
     /// If there was an error before, the file with the code remains for viewing.
     Poco::File(cpp_file_path).remove();
@@ -291,6 +314,8 @@ void Compiler::compile(
     ProfileEvents::increment(ProfileEvents::CompileSuccess);
 
     on_ready(lib);
+
+#endif
 }
 
 

@@ -12,14 +12,14 @@ namespace DB
 class ASTQualifiedAsterisk : public IAST
 {
 public:
-    String getID() const override { return "QualifiedAsterisk"; }
+    String getID(char) const override { return "QualifiedAsterisk"; }
     ASTPtr clone() const override
     {
         auto clone = std::make_shared<ASTQualifiedAsterisk>(*this);
         clone->cloneChildren();
-        return std::move(clone);
+        return clone;
     }
-    String getColumnName() const override;
+    void appendColumnName(WriteBuffer & ostr) const override;
 
 protected:
     void formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const override;

@@ -17,15 +17,22 @@ void registerStorageBuffer(StorageFactory & factory);
 void registerStorageDistributed(StorageFactory & factory);
 void registerStorageMemory(StorageFactory & factory);
 void registerStorageFile(StorageFactory & factory);
+void registerStorageURL(StorageFactory & factory);
 void registerStorageDictionary(StorageFactory & factory);
 void registerStorageSet(StorageFactory & factory);
 void registerStorageJoin(StorageFactory & factory);
 void registerStorageView(StorageFactory & factory);
 void registerStorageMaterializedView(StorageFactory & factory);
 
+#if USE_HDFS
+void registerStorageHDFS(StorageFactory & factory);
+#endif
+
 #if USE_POCO_SQLODBC || USE_POCO_DATAODBC
 void registerStorageODBC(StorageFactory & factory);
 #endif
+
+void registerStorageJDBC(StorageFactory & factory);
 
 #if USE_MYSQL
 void registerStorageMySQL(StorageFactory & factory);
@@ -50,15 +57,22 @@ void registerStorages()
     registerStorageDistributed(factory);
     registerStorageMemory(factory);
     registerStorageFile(factory);
+    registerStorageURL(factory);
     registerStorageDictionary(factory);
     registerStorageSet(factory);
     registerStorageJoin(factory);
     registerStorageView(factory);
     registerStorageMaterializedView(factory);
 
+    #if USE_HDFS
+    registerStorageHDFS(factory);
+    #endif
+
     #if USE_POCO_SQLODBC || USE_POCO_DATAODBC
     registerStorageODBC(factory);
     #endif
+    registerStorageJDBC(factory);
+
 
     #if USE_MYSQL
     registerStorageMySQL(factory);

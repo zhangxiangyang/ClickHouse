@@ -1,8 +1,6 @@
 #pragma once
 
 #include <Storages/MergeTree/MergeTreePartInfo.h>
-#include <mutex>
-#include <common/DateLUT.h>
 #include <Core/Types.h>
 #include <map>
 
@@ -43,7 +41,9 @@ public:
         return *this;
     }
 
-    void add(const String & name);
+    /// Returns true if the part was actually added. If out_replaced_parts != nullptr, it will contain
+    /// parts that were replaced from the set by the newly added part.
+    bool add(const String & name, Strings * out_replaced_parts = nullptr);
 
     bool remove(const MergeTreePartInfo & part_info)
     {
@@ -65,6 +65,8 @@ public:
     Strings getParts() const;
 
     size_t size() const;
+
+    MergeTreeDataFormatVersion getFormatVersion() const { return format_version; }
 
 private:
     MergeTreeDataFormatVersion format_version;
