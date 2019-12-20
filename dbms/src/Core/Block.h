@@ -82,6 +82,7 @@ public:
     const ColumnsWithTypeAndName & getColumnsWithTypeAndName() const;
     NamesAndTypesList getNamesAndTypesList() const;
     Names getNames() const;
+    DataTypes getDataTypes() const;
 
     /// Returns number of rows from first column in block, not equal to nullptr. If no columns, returns 0.
     size_t rows() const;
@@ -89,7 +90,7 @@ public:
     size_t columns() const { return data.size(); }
 
     /// Checks that every column in block is not nullptr and has same number of elements.
-    void checkNumberOfRows() const;
+    void checkNumberOfRows(bool allow_null_columns = false) const;
 
     /// Approximate number of bytes in memory - for profiling and limits.
     size_t bytes() const;
@@ -97,8 +98,8 @@ public:
     /// Approximate number of allocated bytes in memory - for profiling and limits.
     size_t allocatedBytes() const;
 
-    operator bool() const { return !data.empty(); }
-    bool operator!() const { return data.empty(); }
+    operator bool() const { return !!columns(); }
+    bool operator!() const { return !this->operator bool(); }
 
     /** Get a list of column names separated by commas. */
     std::string dumpNames() const;
@@ -143,7 +144,8 @@ private:
 
 using Blocks = std::vector<Block>;
 using BlocksList = std::list<Block>;
-
+using BlocksPtr = std::shared_ptr<Blocks>;
+using BlocksPtrs = std::shared_ptr<std::vector<BlocksPtr>>;
 
 /// Compare number of columns, data types, column types, column names, and values of constant columns.
 bool blocksHaveEqualStructure(const Block & lhs, const Block & rhs);

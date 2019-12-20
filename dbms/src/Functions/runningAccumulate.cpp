@@ -1,4 +1,4 @@
-#include <Functions/IFunction.h>
+#include <Functions/IFunctionImpl.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Columns/ColumnAggregateFunction.h>
@@ -39,6 +39,11 @@ public:
     String getName() const override
     {
         return name;
+    }
+
+    bool isStateful() const override
+    {
+        return true;
     }
 
     size_t getNumberOfArguments() const override

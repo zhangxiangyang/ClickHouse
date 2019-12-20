@@ -49,8 +49,6 @@ interface تحت وب برای ClickHouse در پروژه [Tabix](https://github
 - پیش نمایش جدول با فیلتر کردن و مرتب سازی.
 - اعداد نمایش داده شده فقط خواندنی
 
-## تجاری
-
 ### DBeaver
 
 [DBeaver](https://dbeaver.io/) - مشتری دسکتاپ دسکتاپ دسکتاپ با پشتیبانی ClickHouse.
@@ -60,6 +58,22 @@ interface تحت وب برای ClickHouse در پروژه [Tabix](https://github
 - توسعه پرس و جو با برجسته نحو
 - پیش نمایش جدول
 - تکمیل خودکار
+
+### clickhouse-cli
+
+[clickhouse-cli](https://github.com/hatarist/clickhouse-cli) یک مشتری خط فرمان برای ClickHouse است که در پایتون 3 نوشته شده است.
+
+امکانات:
+- تکمیل خودکار
+- نحو برجسته برای نمایش داده ها و خروجی داده ها.
+- پشتیبانی از Pager برای خروجی داده.
+- دستورات پست سفارشی مانند PostgreSQL.
+
+### clickhouse-flamegraph
+
+[clickhouse-flamegraph](https://github.com/Slach/clickhouse-flamegraph) یک ابزار تخصصی برای تجسم است `system.trace_log`مانند[flamegraph](http://www.brendangregg.com/flamegraphs.html).
+
+## تجاری
 
 ### DataGrip
 

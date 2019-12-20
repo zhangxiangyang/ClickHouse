@@ -5,12 +5,18 @@
 #include <variant>
 #include <Columns/ColumnDecimal.h>
 #include <Columns/ColumnString.h>
+#include <Core/Block.h>
 #include <Common/HashTable/HashMap.h>
+#include <sparsehash/sparse_hash_map>
 #include <ext/range.h>
 #include "DictionaryStructure.h"
 #include "IDictionary.h"
 #include "IDictionarySource.h"
 
+/** This dictionary stores all content in a hash table in memory
+  * (a separate Key -> Value map for each attribute)
+  * Two variants of hash table are supported: a fast HashMap and memory efficient sparse_hash_map.
+  */
 
 namespace DB
 {
@@ -20,20 +26,17 @@ class HashedDictionary final : public IDictionary
 {
 public:
     HashedDictionary(
-        const std::string & name,
-        const DictionaryStructure & dict_struct,
-        DictionarySourcePtr source_ptr,
-        const DictionaryLifetime dict_lifetime,
-        bool require_nonempty,
-        BlockPtr saved_block = nullptr);
-
-    HashedDictionary(const HashedDictionary & other);
-
-    std::exception_ptr getCreationException() const override { return creation_exception; }
+        const std::string & name_,
+        const DictionaryStructure & dict_struct_,
+        DictionarySourcePtr source_ptr_,
+        const DictionaryLifetime dict_lifetime_,
+        bool require_nonempty_,
+        bool sparse_,
+        BlockPtr saved_block_ = nullptr);
 
     std::string getName() const override { return name; }
 
-    std::string getTypeName() const override { return "Hashed"; }
+    std::string getTypeName() const override { return sparse ? "SparseHashed" : "Hashed"; }
 
     size_t getBytesAllocated() const override { return bytes_allocated; }
 
@@ -45,17 +48,16 @@ public:
 
     double getLoadFactor() const override { return static_cast<double>(element_count) / bucket_count; }
 
-    bool isCached() const override { return false; }
-
-    std::unique_ptr<IExternalLoadable> clone() const override { return std::make_unique<HashedDictionary>(*this); }
+    std::shared_ptr<const IExternalLoadable> clone() const override
+    {
+        return std::make_shared<HashedDictionary>(name, dict_struct, source_ptr->clone(), dict_lifetime, require_nonempty, sparse, saved_block);
+    }
 
     const IDictionarySource * getSource() const override { return source_ptr.get(); }
 
     const DictionaryLifetime & getLifetime() const override { return dict_lifetime; }
 
     const DictionaryStructure & getStructure() const override { return dict_struct; }
-
-    std::chrono::time_point<std::chrono::system_clock> getCreationTime() const override { return creation_time; }
 
     bool isInjective(const std::string & attribute_name) const override
     {
@@ -151,6 +153,11 @@ private:
     template <typename Value>
     using CollectionPtrType = std::unique_ptr<CollectionType<Value>>;
 
+    template <typename Value>
+    using SparseCollectionType = google::sparse_hash_map<UInt64, Value, DefaultHash<UInt64>>;
+    template <typename Value>
+    using SparseCollectionPtrType = std::unique_ptr<SparseCollectionType<Value>>;
+
     struct Attribute final
     {
         AttributeUnderlyingType type;
@@ -188,6 +195,23 @@ private:
             CollectionPtrType<Float64>,
             CollectionPtrType<StringRef>>
             maps;
+        std::variant<
+            SparseCollectionPtrType<UInt8>,
+            SparseCollectionPtrType<UInt16>,
+            SparseCollectionPtrType<UInt32>,
+            SparseCollectionPtrType<UInt64>,
+            SparseCollectionPtrType<UInt128>,
+            SparseCollectionPtrType<Int8>,
+            SparseCollectionPtrType<Int16>,
+            SparseCollectionPtrType<Int32>,
+            SparseCollectionPtrType<Int64>,
+            SparseCollectionPtrType<Decimal32>,
+            SparseCollectionPtrType<Decimal64>,
+            SparseCollectionPtrType<Decimal128>,
+            SparseCollectionPtrType<Float32>,
+            SparseCollectionPtrType<Float64>,
+            SparseCollectionPtrType<StringRef>>
+            sparse_maps;
         std::unique_ptr<Arena> string_arena;
     };
 
@@ -209,29 +233,32 @@ private:
 
     Attribute createAttributeWithType(const AttributeUnderlyingType type, const Field & null_value);
 
-    template <typename OutputType, typename ValueSetter, typename DefaultGetter>
-    void getItemsNumber(
-        const Attribute & attribute, const PaddedPODArray<Key> & ids, ValueSetter && set_value, DefaultGetter && get_default) const;
-
+    template <typename OutputType, typename AttrType, typename ValueSetter, typename DefaultGetter>
+    void getItemsAttrImpl(
+        const AttrType & attr, const PaddedPODArray<Key> & ids, ValueSetter && set_value, DefaultGetter && get_default) const;
     template <typename AttributeType, typename OutputType, typename ValueSetter, typename DefaultGetter>
     void getItemsImpl(
         const Attribute & attribute, const PaddedPODArray<Key> & ids, ValueSetter && set_value, DefaultGetter && get_default) const;
 
     template <typename T>
-    void setAttributeValueImpl(Attribute & attribute, const Key id, const T value);
+    bool setAttributeValueImpl(Attribute & attribute, const Key id, const T value);
 
-    void setAttributeValue(Attribute & attribute, const Key id, const Field & value);
+    bool setAttributeValue(Attribute & attribute, const Key id, const Field & value);
 
     const Attribute & getAttribute(const std::string & attribute_name) const;
 
     template <typename T>
     void has(const Attribute & attribute, const PaddedPODArray<Key> & ids, PaddedPODArray<UInt8> & out) const;
 
+    template <typename T, typename AttrType>
+    PaddedPODArray<Key> getIdsAttrImpl(const AttrType & attr) const;
     template <typename T>
     PaddedPODArray<Key> getIds(const Attribute & attribute) const;
 
     PaddedPODArray<Key> getIds() const;
 
+    template <typename AttrType, typename ChildType, typename AncestorType>
+    void isInAttrImpl(const AttrType & attr, const ChildType & child_ids, const AncestorType & ancestor_ids, PaddedPODArray<UInt8> & out) const;
     template <typename ChildType, typename AncestorType>
     void isInImpl(const ChildType & child_ids, const AncestorType & ancestor_ids, PaddedPODArray<UInt8> & out) const;
 
@@ -240,6 +267,7 @@ private:
     const DictionarySourcePtr source_ptr;
     const DictionaryLifetime dict_lifetime;
     const bool require_nonempty;
+    const bool sparse;
 
     std::map<std::string, size_t> attribute_index_by_name;
     std::vector<Attribute> attributes;
@@ -249,10 +277,6 @@ private:
     size_t element_count = 0;
     size_t bucket_count = 0;
     mutable std::atomic<size_t> query_count{0};
-
-    std::chrono::time_point<std::chrono::system_clock> creation_time;
-
-    std::exception_ptr creation_exception;
 
     BlockPtr saved_block;
 };

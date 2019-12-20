@@ -1,6 +1,7 @@
 #include <AggregateFunctions/AggregateFunctionMerge.h>
 #include <AggregateFunctions/AggregateFunctionCombinatorFactory.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
+#include "registerAggregateFunctions.h"
 
 
 namespace DB
@@ -47,7 +48,7 @@ public:
                 + ", because it corresponds to different aggregate function: " + function->getFunctionName() + " instead of " + nested_function->getName(),
                 ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
 
-        return std::make_shared<AggregateFunctionMerge>(nested_function, *argument);
+        return std::make_shared<AggregateFunctionMerge>(nested_function, argument);
     }
 };
 

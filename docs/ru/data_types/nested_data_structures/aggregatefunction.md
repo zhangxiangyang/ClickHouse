@@ -1,6 +1,4 @@
-<a name="data_type-aggregatefunction"></a>
-
-# AggregateFunction(name, types_of_arguments...)
+# AggregateFunction(name, types_of_arguments...) {#data_type-aggregatefunction}
 
 Промежуточное состояние агрегатной функции. Чтобы его получить, используются агрегатные функции с суффиксом `-State`. Чтобы в дальнейшем получить агрегированные данные необходимо использовать те же агрегатные функции с суффиксом `-Merge`.
 
@@ -35,7 +33,7 @@ CREATE TABLE t
 
 **Примеры функций**
 
-```
+```sql
 uniqState(UserID)
 quantilesState(0.5, 0.9)(SendTiming)
 ```

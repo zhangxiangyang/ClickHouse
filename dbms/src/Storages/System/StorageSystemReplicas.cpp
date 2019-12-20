@@ -22,6 +22,7 @@ StorageSystemReplicas::StorageSystemReplicas(const std::string & name_)
         { "table",                                std::make_shared<DataTypeString>()   },
         { "engine",                               std::make_shared<DataTypeString>()   },
         { "is_leader",                            std::make_shared<DataTypeUInt8>()    },
+        { "can_become_leader",                    std::make_shared<DataTypeUInt8>()    },
         { "is_readonly",                          std::make_shared<DataTypeUInt8>()    },
         { "is_session_expired",                   std::make_shared<DataTypeUInt8>()    },
         { "future_parts",                         std::make_shared<DataTypeUInt32>()   },
@@ -65,9 +66,12 @@ BlockInputStreams StorageSystemReplicas::read(
     std::map<String, std::map<String, StoragePtr>> replicated_tables;
     for (const auto & db : context.getDatabases())
     {
+        /// Lazy database can not contain replicated tables
+        if (db.second->getEngineName() == "Lazy")
+            continue;
         if (context.hasDatabaseAccessRights(db.first))
         {
-            for (auto iterator = db.second->getIterator(context); iterator->isValid(); iterator->next())
+            for (auto iterator = db.second->getTablesIterator(context); iterator->isValid(); iterator->next())
                 if (dynamic_cast<const StorageReplicatedMergeTree *>(iterator->table().get()))
                     replicated_tables[db.first][iterator->name()] = iterator->table();
         }
@@ -137,6 +141,7 @@ BlockInputStreams StorageSystemReplicas::read(
 
         size_t col_num = 3;
         res_columns[col_num++]->insert(status.is_leader);
+        res_columns[col_num++]->insert(status.can_become_leader);
         res_columns[col_num++]->insert(status.is_readonly);
         res_columns[col_num++]->insert(status.is_session_expired);
         res_columns[col_num++]->insert(status.queue.future_parts);

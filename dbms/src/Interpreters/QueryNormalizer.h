@@ -1,25 +1,17 @@
 #pragma once
 
-#include <Core/Names.h>
+#include <map>
+
 #include <Parsers/IAST.h>
-#include <Interpreters/DatabaseAndTableWithAlias.h>
+#include <Interpreters/Aliases.h>
 
 namespace DB
 {
 
-inline bool functionIsInOperator(const String & name)
-{
-    return name == "in" || name == "notIn";
-}
-
-inline bool functionIsInOrGlobalInOperator(const String & name)
-{
-    return functionIsInOperator(name) || name == "globalIn" || name == "globalNotIn";
-}
-
-
-using TableNameAndColumnNames = std::pair<DatabaseAndTableWithAlias, Names>;
-using TableNamesAndColumnNames = std::vector<TableNameAndColumnNames>;
+class ASTSelectQuery;
+class ASTIdentifier;
+struct ASTTablesInSelectQueryElement;
+class Context;
 
 
 class QueryNormalizer
@@ -29,35 +21,55 @@ class QueryNormalizer
     {
         const UInt64 max_ast_depth;
         const UInt64 max_expanded_ast_elements;
-        const String count_distinct_implementation;
 
         template <typename T>
         ExtractedSettings(const T & settings)
         :   max_ast_depth(settings.max_ast_depth),
-            max_expanded_ast_elements(settings.max_expanded_ast_elements),
-            count_distinct_implementation(settings.count_distinct_implementation)
+            max_expanded_ast_elements(settings.max_expanded_ast_elements)
         {}
     };
 
 public:
-    using Aliases = std::unordered_map<String, ASTPtr>;
+    struct Data
+    {
+        using SetOfASTs = std::set<const IAST *>;
+        using MapOfASTs = std::map<ASTPtr, ASTPtr>;
 
-    QueryNormalizer(ASTPtr & query, const Aliases & aliases, ExtractedSettings && settings, const Names & all_columns_name,
-                    const TableNamesAndColumnNames & table_names_and_column_names);
+        const Aliases & aliases;
+        const ExtractedSettings settings;
 
-    void perform();
+        /// tmp data
+        size_t level;
+        MapOfASTs finished_asts;    /// already processed vertices (and by what they replaced)
+        SetOfASTs current_asts;     /// vertices in the current call stack of this method
+        std::string current_alias;  /// the alias referencing to the ancestor of ast (the deepest ancestor with aliases)
+
+        Data(const Aliases & aliases_, ExtractedSettings && settings_)
+            : aliases(aliases_)
+            , settings(settings_)
+            , level(0)
+        {}
+    };
+
+    QueryNormalizer(Data & data)
+        : visitor_data(data)
+    {}
+
+    void visit(ASTPtr & ast)
+    {
+        visit(ast, visitor_data);
+    }
 
 private:
-    using SetOfASTs = std::set<const IAST *>;
-    using MapOfASTs = std::map<ASTPtr, ASTPtr>;
+    Data & visitor_data;
 
-    ASTPtr & query;
-    const Aliases & aliases;
-    const ExtractedSettings settings;
-    const Names & all_column_names;
-    const TableNamesAndColumnNames & table_names_and_column_names;
+    static void visit(ASTPtr & query, Data & data);
 
-    void performImpl(ASTPtr & ast, MapOfASTs & finished_asts, SetOfASTs & current_asts, std::string current_alias, size_t level);
+    static void visit(ASTIdentifier &, ASTPtr &, Data &);
+    static void visit(ASTTablesInSelectQueryElement &, const ASTPtr &, Data &);
+    static void visit(ASTSelectQuery &, const ASTPtr &, Data &);
+
+    static void visitChildren(const ASTPtr &, Data & data);
 };
 
 }

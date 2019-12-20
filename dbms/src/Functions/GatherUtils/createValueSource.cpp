@@ -1,5 +1,6 @@
-#include <Functions/GatherUtils/Sinks.h>
-#include <Functions/GatherUtils/Sources.h>
+#include "GatherUtils.h"
+#include "Sinks.h"
+#include "Sources.h"
 #include <Core/TypeListNumber.h>
 
 namespace DB::GatherUtils
@@ -14,7 +15,9 @@ struct ValueSourceCreator<Type, Types...>
 {
     static std::unique_ptr<IValueSource> create(const IColumn & col, const NullMap * null_map, bool is_const, size_t total_rows)
     {
-        if (auto column_vector = typeid_cast<const ColumnVector<Type> *>(&col))
+        using ColVecType = std::conditional_t<IsDecimalNumber<Type>, ColumnDecimal<Type>, ColumnVector<Type>>;
+
+        if (auto column_vector = typeid_cast<const ColVecType *>(&col))
         {
             if (null_map)
             {

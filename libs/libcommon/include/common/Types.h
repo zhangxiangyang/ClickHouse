@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
-#include <cstddef>
+#include <cstdlib>
+#include <type_traits>
+#include <algorithm>
 
 using Int8 = int8_t;
 using Int16 = int16_t;
@@ -12,29 +14,42 @@ using UInt16 = uint16_t;
 using UInt32 = uint32_t;
 using UInt64 = uint64_t;
 
-
-/** This is not the best way to overcome an issue of different definitions
-  * of uint64_t and size_t on Linux and Mac OS X (both 64 bit).
-  *
-  * Note that on both platforms, long and long long are 64 bit types.
-  * But they are always different types (with the same physical representation).
-  */
-namespace std
+/// The standard library type traits, such as std::is_arithmetic, with one exception
+/// (std::common_type), are "set in stone". Attempting to specialize them causes undefined behavior.
+/// So instead of using the std type_traits, we use our own version which allows extension.
+template <typename T>
+struct is_signed
 {
-    inline UInt64 max(unsigned long x, unsigned long long y) { return x > y ? x : y; }
-    inline UInt64 max(unsigned long long x, unsigned long y) { return x > y ? x : y; }
-    inline UInt64 min(unsigned long x, unsigned long long y) { return x < y ? x : y; }
-    inline UInt64 min(unsigned long long x, unsigned long y) { return x < y ? x : y; }
+    static constexpr bool value = std::is_signed_v<T>;
+};
 
-    inline Int64 max(long x, long long y) { return x > y ? x : y; }
-    inline Int64 max(long long x, long y) { return x > y ? x : y; }
-    inline Int64 min(long x, long long y) { return x < y ? x : y; }
-    inline Int64 min(long long x, long y) { return x < y ? x : y; }
-}
+template <typename T>
+inline constexpr bool is_signed_v = is_signed<T>::value;
 
+template <typename T>
+struct is_unsigned
+{
+    static constexpr bool value = std::is_unsigned_v<T>;
+};
 
-/// Workaround for the issue, that KDevelop doesn't see time_t and size_t types (for syntax highlight).
-#ifdef IN_KDEVELOP_PARSER
-    using time_t = Int64;
-    using size_t = UInt64;
-#endif
+template <typename T>
+inline constexpr bool is_unsigned_v = is_unsigned<T>::value;
+
+template <typename T>
+struct is_integral
+{
+    static constexpr bool value = std::is_integral_v<T>;
+};
+
+template <typename T>
+inline constexpr bool is_integral_v = is_integral<T>::value;
+
+template <typename T>
+struct is_arithmetic
+{
+    static constexpr bool value = std::is_arithmetic_v<T>;
+};
+
+template <typename T>
+inline constexpr bool is_arithmetic_v = is_arithmetic<T>::value;
+

@@ -1,17 +1,17 @@
 #pragma once
-#include <Interpreters/IInterpreter.h>
 
+#include <Interpreters/IInterpreter.h>
+#include <Parsers/IAST_fwd.h>
+#include <Storages/IStorage_fwd.h>
+
+
+namespace Poco { class Logger; }
 
 namespace DB
 {
 
 class Context;
-class IAST;
 class ASTSystemQuery;
-class IStorage;
-using ASTPtr = std::shared_ptr<IAST>;
-using StoragePtr = std::shared_ptr<IStorage>;
-
 
 class InterpreterSystemQuery : public IInterpreter
 {
@@ -19,6 +19,9 @@ public:
     InterpreterSystemQuery(const ASTPtr & query_ptr_, Context & context_);
 
     BlockIO execute() override;
+
+    bool ignoreQuota() const override { return true; }
+    bool ignoreLimits() const override { return true; }
 
 private:
     ASTPtr query_ptr;
@@ -31,6 +34,7 @@ private:
 
     void restartReplicas(Context & system_context);
     void syncReplica(ASTSystemQuery & query);
+    void flushDistributed(ASTSystemQuery & query);
 };
 
 

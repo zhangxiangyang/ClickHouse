@@ -81,6 +81,7 @@ ASTPtr ASTTablesInSelectQuery::clone() const
 
 void ASTTableExpression::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
 {
+    frame.current_select = this;
     std::string indent_str = settings.one_line ? "" : std::string(4 * frame.indent, ' ');
 
     if (database_and_table_name)
@@ -139,11 +140,21 @@ void ASTTableJoin::formatImplBeforeTable(const FormatSettings & settings, Format
         {
             case Strictness::Unspecified:
                 break;
+            case Strictness::RightAny:
             case Strictness::Any:
                 settings.ostr << "ANY ";
                 break;
             case Strictness::All:
                 settings.ostr << "ALL ";
+                break;
+            case Strictness::Asof:
+                settings.ostr << "ASOF ";
+                break;
+            case Strictness::Semi:
+                settings.ostr << "SEMI ";
+                break;
+            case Strictness::Anti:
+                settings.ostr << "ANTI ";
                 break;
         }
     }
@@ -180,14 +191,14 @@ void ASTTableJoin::formatImplAfterTable(const FormatSettings & settings, FormatS
 
     if (using_expression_list)
     {
-        settings.ostr << (settings.hilite ? hilite_keyword : "") << "USING " << (settings.hilite ? hilite_none : "");
+        settings.ostr << (settings.hilite ? hilite_keyword : "") << " USING " << (settings.hilite ? hilite_none : "");
         settings.ostr << "(";
         using_expression_list->formatImpl(settings, state, frame);
         settings.ostr << ")";
     }
     else if (on_expression)
     {
-        settings.ostr << (settings.hilite ? hilite_keyword : "") << "ON " << (settings.hilite ? hilite_none : "");
+        settings.ostr << (settings.hilite ? hilite_keyword : "") << " ON " << (settings.hilite ? hilite_none : "");
         on_expression->formatImpl(settings, state, frame);
     }
 }
@@ -208,7 +219,7 @@ void ASTArrayJoin::formatImpl(const FormatSettings & settings, FormatState & sta
 
     settings.one_line
         ? expression_list->formatImpl(settings, state, frame)
-        : typeid_cast<const ASTExpressionList &>(*expression_list).formatImplMultiline(settings, state, frame);
+        : expression_list->as<ASTExpressionList &>().formatImplMultiline(settings, state, frame);
 }
 
 
@@ -218,15 +229,14 @@ void ASTTablesInSelectQueryElement::formatImpl(const FormatSettings & settings, 
     {
         if (table_join)
         {
-            static_cast<const ASTTableJoin &>(*table_join).formatImplBeforeTable(settings, state, frame);
+            table_join->as<ASTTableJoin &>().formatImplBeforeTable(settings, state, frame);
             settings.ostr << " ";
         }
 
         table_expression->formatImpl(settings, state, frame);
-        settings.ostr << " ";
 
         if (table_join)
-            static_cast<const ASTTableJoin &>(*table_join).formatImplAfterTable(settings, state, frame);
+            table_join->as<ASTTableJoin &>().formatImplAfterTable(settings, state, frame);
     }
     else if (array_join)
     {

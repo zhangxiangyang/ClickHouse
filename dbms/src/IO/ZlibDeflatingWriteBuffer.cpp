@@ -1,18 +1,19 @@
 #include <IO/ZlibDeflatingWriteBuffer.h>
+#include <Common/MemorySanitizer.h>
 
 
 namespace DB
 {
 
 ZlibDeflatingWriteBuffer::ZlibDeflatingWriteBuffer(
-        WriteBuffer & out_,
-        ZlibCompressionMethod compression_method,
+        std::unique_ptr<WriteBuffer> out_,
+        CompressionMethod compression_method,
         int compression_level,
         size_t buf_size,
         char * existing_memory,
         size_t alignment)
     : BufferWithOwnMemory<WriteBuffer>(buf_size, existing_memory, alignment)
-    , out(out_)
+    , out(std::move(out_))
 {
     zstr.zalloc = nullptr;
     zstr.zfree = nullptr;
@@ -23,7 +24,7 @@ ZlibDeflatingWriteBuffer::ZlibDeflatingWriteBuffer(
     zstr.avail_out = 0;
 
     int window_bits = 15;
-    if (compression_method == ZlibCompressionMethod::Gzip)
+    if (compression_method == CompressionMethod::Gzip)
     {
         window_bits += 16;
     }
@@ -63,12 +64,12 @@ void ZlibDeflatingWriteBuffer::nextImpl()
 
     do
     {
-        out.nextIfAtEnd();
-        zstr.next_out = reinterpret_cast<unsigned char *>(out.position());
-        zstr.avail_out = out.buffer().end() - out.position();
+        out->nextIfAtEnd();
+        zstr.next_out = reinterpret_cast<unsigned char *>(out->position());
+        zstr.avail_out = out->buffer().end() - out->position();
 
         int rc = deflate(&zstr, Z_NO_FLUSH);
-        out.position() = out.buffer().end() - zstr.avail_out;
+        out->position() = out->buffer().end() - zstr.avail_out;
 
         if (rc != Z_OK)
             throw Exception(std::string("deflate failed: ") + zError(rc), ErrorCodes::ZLIB_DEFLATE_FAILED);
@@ -85,20 +86,22 @@ void ZlibDeflatingWriteBuffer::finish()
 
     while (true)
     {
-        out.nextIfAtEnd();
-        zstr.next_out = reinterpret_cast<unsigned char *>(out.position());
-        zstr.avail_out = out.buffer().end() - out.position();
+        out->nextIfAtEnd();
+        zstr.next_out = reinterpret_cast<unsigned char *>(out->position());
+        zstr.avail_out = out->buffer().end() - out->position();
 
         int rc = deflate(&zstr, Z_FINISH);
-        out.position() = out.buffer().end() - zstr.avail_out;
+        out->position() = out->buffer().end() - zstr.avail_out;
 
         if (rc == Z_STREAM_END)
+        {
+            finished = true;
             return;
+        }
+
         if (rc != Z_OK)
             throw Exception(std::string("deflate finish failed: ") + zError(rc), ErrorCodes::ZLIB_DEFLATE_FAILED);
     }
-
-    finished = true;
 }
 
 }

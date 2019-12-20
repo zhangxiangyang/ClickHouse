@@ -53,6 +53,10 @@ void ExternalQueryBuilder::writeQuoted(const std::string & s, WriteBuffer & out)
         case IdentifierQuotingStyle::DoubleQuotes:
             writeDoubleQuotedString(s, out);
             break;
+
+        case IdentifierQuotingStyle::BackticksMySQL:
+            writeBackQuotedStringMySQL(s, out);
+            break;
     }
 }
 
@@ -163,7 +167,7 @@ std::string ExternalQueryBuilder::composeUpdateQuery(const std::string & update_
     else
         update_query = " WHERE " + update_field + " >= '" + time_point + "'";
 
-    return out.insert(out.size() - 1, update_query); ///This is done to insert "update_query" before "out"'s semicolon
+    return out.insert(out.size() - 1, update_query); /// This is done to insert "update_query" before "out"'s semicolon
 }
 
 
@@ -298,7 +302,7 @@ ExternalQueryBuilder::composeLoadKeysQuery(const Columns & key_columns, const st
             composeKeyCondition(key_columns, row, out);
         }
     }
-    else if (method == IN_WITH_TUPLES)
+    else /* if (method == IN_WITH_TUPLES) */
     {
         writeString(composeKeyTupleDefinition(), out);
         writeString(" IN (", out);
@@ -345,7 +349,7 @@ void ExternalQueryBuilder::composeKeyCondition(const Columns & key_columns, cons
         /// key_i=value_i
         writeString(key_description.name, out);
         writeString("=", out);
-        key_description.type->serializeTextQuoted(*key_columns[i], row, out, format_settings);
+        key_description.type->serializeAsTextQuoted(*key_columns[i], row, out, format_settings);
     }
 
     writeString(")", out);
@@ -387,7 +391,7 @@ void ExternalQueryBuilder::composeKeyTuple(const Columns & key_columns, const si
             writeString(", ", out);
 
         first = false;
-        (*dict_struct.key)[i].type->serializeTextQuoted(*key_columns[i], row, out, format_settings);
+        (*dict_struct.key)[i].type->serializeAsTextQuoted(*key_columns[i], row, out, format_settings);
     }
 
     writeString(")", out);

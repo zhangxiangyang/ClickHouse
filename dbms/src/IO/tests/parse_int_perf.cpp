@@ -8,16 +8,16 @@
 #include <IO/WriteIntText.h>
 #include <IO/WriteBufferFromVector.h>
 #include <IO/WriteBufferFromString.h>
-#include <IO/CompressedWriteBuffer.h>
-#include <IO/CompressedReadBuffer.h>
 #include <IO/AsynchronousWriteBuffer.h>
+#include <Compression/CompressedWriteBuffer.h>
+#include <Compression/CompressedReadBuffer.h>
 
 #include <Common/Stopwatch.h>
 
 
-UInt64 rdtsc()
+static UInt64 rdtsc()
 {
-#if __x86_64__
+#if defined(__x86_64__)
     UInt64 val;
     __asm__ __volatile__("rdtsc" : "=A" (val) :);
     return val;

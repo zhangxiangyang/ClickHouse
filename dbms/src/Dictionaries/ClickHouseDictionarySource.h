@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <Poco/Logger.h>
 #include <Client/ConnectionPoolWithFailover.h>
+#include <Interpreters/Context.h>
 #include "DictionaryStructure.h"
 #include "ExternalQueryBuilder.h"
 #include "IDictionarySource.h"
@@ -20,11 +22,12 @@ public:
         const DictionaryStructure & dict_struct_,
         const Poco::Util::AbstractConfiguration & config,
         const std::string & config_prefix,
-        const Block & sample_block,
-        Context & context);
+        const Block & sample_block_,
+        const Context & context);
 
     /// copy-constructor is provided in order to support cloneability
     ClickHouseDictionarySource(const ClickHouseDictionarySource & other);
+    ClickHouseDictionarySource & operator=(const ClickHouseDictionarySource &) = delete;
 
     BlockInputStreamPtr loadAll() override;
 
@@ -65,10 +68,11 @@ private:
     mutable std::string invalidate_query_response;
     ExternalQueryBuilder query_builder;
     Block sample_block;
-    Context & context;
+    Context context;
     const bool is_local;
     ConnectionPoolWithFailoverPtr pool;
     const std::string load_all_query;
+    Poco::Logger * log = &Poco::Logger::get("ClickHouseDictionarySource");
 };
 
 }

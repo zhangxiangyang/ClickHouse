@@ -1,11 +1,14 @@
 #pragma once
 #include <Core/Types.h>
+#include <Core/DecimalFunctions.h>
 #include <Common/Exception.h>
 #include <common/DateLUTImpl.h>
 #include <Columns/ColumnVector.h>
+#include <Columns/ColumnDecimal.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/extractTimeZoneFromFunctionArguments.h>
-
+#include <DataTypes/DataTypeDateTime.h>
+#include <DataTypes/DataTypeDateTime64.h>
 
 namespace DB
 {
@@ -65,9 +68,9 @@ struct ToStartOfDayImpl
     {
         return time_zone.toDate(t);
     }
-    static inline UInt32 execute(UInt16, const DateLUTImpl &)
+    static inline UInt32 execute(UInt16 d, const DateLUTImpl & time_zone)
     {
-        return dateIsNotSupported(name);
+        return time_zone.toDate(DayNum(d));
     }
 
     using FactorTransform = ZeroTransform;
@@ -179,6 +182,22 @@ struct ToStartOfFiveMinuteImpl
     static inline UInt32 execute(UInt32 t, const DateLUTImpl & time_zone)
     {
         return time_zone.toStartOfFiveMinute(t);
+    }
+    static inline UInt32 execute(UInt16, const DateLUTImpl &)
+    {
+        return dateIsNotSupported(name);
+    }
+
+    using FactorTransform = ZeroTransform;
+};
+
+struct ToStartOfTenMinutesImpl
+{
+    static constexpr auto name = "toStartOfTenMinutes";
+
+    static inline UInt32 execute(UInt32 t, const DateLUTImpl & time_zone)
+    {
+        return time_zone.toStartOfTenMinutes(t);
     }
     static inline UInt32 execute(UInt16, const DateLUTImpl &)
     {
@@ -613,32 +632,36 @@ struct ToYYYYMMDDhhmmssImpl
 template <typename FromType, typename ToType, typename Transform>
 struct Transformer
 {
-    static void vector(const PaddedPODArray<FromType> & vec_from, PaddedPODArray<ToType> & vec_to, const DateLUTImpl & time_zone)
+    template <typename FromTypeVector, typename ToTypeVector>
+    static void vector(const FromTypeVector & vec_from, ToTypeVector & vec_to, const DateLUTImpl & time_zone, const Transform & transform)
     {
         size_t size = vec_from.size();
         vec_to.resize(size);
 
         for (size_t i = 0; i < size; ++i)
-            vec_to[i] = Transform::execute(vec_from[i], time_zone);
+            vec_to[i] = transform.execute(vec_from[i], time_zone);
     }
 };
 
 
-template <typename FromType, typename ToType, typename Transform>
+template <typename FromDataType, typename ToDataType, typename Transform>
 struct DateTimeTransformImpl
 {
-    static void execute(Block & block, const ColumnNumbers & arguments, size_t result, size_t /*input_rows_count*/)
+    static void execute(Block & block, const ColumnNumbers & arguments, size_t result, size_t /*input_rows_count*/, const Transform & transform = {})
     {
-        using Op = Transformer<FromType, ToType, Transform>;
+        using Op = Transformer<typename FromDataType::FieldType, typename ToDataType::FieldType, Transform>;
 
         const DateLUTImpl & time_zone = extractTimeZoneFromFunctionArguments(block, arguments, 1, 0);
 
         const ColumnPtr source_col = block.getByPosition(arguments[0]).column;
-        if (const auto * sources = checkAndGetColumn<ColumnVector<FromType>>(source_col.get()))
+        if (const auto * sources = checkAndGetColumn<typename FromDataType::ColumnType>(source_col.get()))
         {
-            auto col_to = ColumnVector<ToType>::create();
-            Op::vector(sources->getData(), col_to->getData(), time_zone);
-            block.getByPosition(result).column = std::move(col_to);
+            auto mutable_result_col = block.getByPosition(result).type->createColumn();
+            auto * col_to = assert_cast<typename ToDataType::ColumnType *>(mutable_result_col.get());
+
+            Op::vector(sources->getData(), col_to->getData(), time_zone, transform);
+
+            block.getByPosition(result).column = std::move(mutable_result_col);
         }
         else
         {

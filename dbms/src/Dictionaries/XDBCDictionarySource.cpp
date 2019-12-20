@@ -1,13 +1,12 @@
 #include "XDBCDictionarySource.h"
 
 #include <Columns/ColumnString.h>
-#include <DataStreams/IProfilingBlockInputStream.h>
+#include <DataStreams/IBlockInputStream.h>
 #include <DataTypes/DataTypeString.h>
 #include <Formats/FormatFactory.h>
 #include <IO/ReadWriteBufferFromHTTP.h>
 #include <IO/WriteHelpers.h>
 #include <Interpreters/Context.h>
-#include <Poco/Ext/SessionPoolHelpers.h>
 #include <Poco/Net/HTTPRequest.h>
 #include <Poco/Util/AbstractConfiguration.h>
 #include <Common/XDBCBridgeHelper.h>
@@ -18,6 +17,8 @@
 #include "readInvalidateQuery.h"
 
 #include <Common/config.h>
+#include "registerDictionaries.h"
+
 #if USE_POCO_SQLODBC || USE_POCO_DATAODBC
 #    include <Poco/Data/ODBC/Connector.h>
 #endif
@@ -31,7 +32,7 @@ namespace ErrorCodes
 
 namespace
 {
-    class XDBCBridgeBlockInputStream : public IProfilingBlockInputStream
+    class XDBCBridgeBlockInputStream : public IBlockInputStream
     {
     public:
         XDBCBridgeBlockInputStream(
@@ -39,10 +40,10 @@ namespace
             std::function<void(std::ostream &)> callback,
             const Block & sample_block,
             const Context & context,
-            size_t max_block_size,
+            UInt64 max_block_size,
             const ConnectionTimeouts & timeouts,
-            const String name)
-            : name(name)
+            const String name_)
+            : name(name_)
         {
             read_buf = std::make_unique<ReadWriteBufferFromHTTP>(uri, Poco::Net::HTTPRequest::HTTP_POST, callback, timeouts);
             reader
@@ -62,7 +63,7 @@ namespace
     };
 }
 
-static const size_t max_block_size = 8192;
+static const UInt64 max_block_size = 8192;
 
 
 XDBCDictionarySource::XDBCDictionarySource(
@@ -84,7 +85,7 @@ XDBCDictionarySource::XDBCDictionarySource(
     , load_all_query{query_builder.composeLoadAllQuery()}
     , invalidate_query{config_.getString(config_prefix_ + ".invalidate_query", "")}
     , bridge_helper{bridge_}
-    , timeouts{ConnectionTimeouts::getHTTPTimeouts(context_.getSettingsRef())}
+    , timeouts{ConnectionTimeouts::getHTTPTimeouts(context_)}
     , global_context(context_)
 {
     bridge_url = bridge_helper->getMainURI();
@@ -128,8 +129,7 @@ std::string XDBCDictionarySource::getUpdateFieldAndDate()
     else
     {
         update_time = std::chrono::system_clock::now();
-        std::string str_time("0000-00-00 00:00:00"); ///for initial load
-        return query_builder.composeUpdateQuery(update_field, str_time);
+        return query_builder.composeLoadAllQuery();
     }
 }
 
@@ -240,7 +240,8 @@ void registerDictionarySourceXDBC(DictionarySourceFactory & factory)
                                  const Poco::Util::AbstractConfiguration & config,
                                  const std::string & config_prefix,
                                  Block & sample_block,
-                                 Context & context) -> DictionarySourcePtr {
+                                 const Context & context,
+                                 bool /* check_config */) -> DictionarySourcePtr {
 #if USE_POCO_SQLODBC || USE_POCO_DATAODBC
         BridgeHelperPtr bridge = std::make_shared<XDBCBridgeHelper<ODBCBridgeMixin>>(
             context, context.getSettings().http_receive_timeout, config.getString(config_prefix + ".odbc.connection_string"));
@@ -264,7 +265,8 @@ void registerDictionarySourceJDBC(DictionarySourceFactory & factory)
                                  const Poco::Util::AbstractConfiguration & /* config */,
                                  const std::string & /* config_prefix */,
                                  Block & /* sample_block */,
-                                 const Context & /* context */) -> DictionarySourcePtr {
+                                 const Context & /* context */,
+                                 bool /* check_config */) -> DictionarySourcePtr {
         throw Exception{"Dictionary source of type `jdbc` is disabled until consistent support for nullable fields.",
                         ErrorCodes::SUPPORT_IS_DISABLED};
         //        BridgeHelperPtr bridge = std::make_shared<XDBCBridgeHelper<JDBCBridgeMixin>>(config, context.getSettings().http_receive_timeout, config.getString(config_prefix + ".connection_string"));

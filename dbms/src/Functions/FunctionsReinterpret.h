@@ -5,14 +5,16 @@
 #include <DataTypes/DataTypeFixedString.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDateTime.h>
+#include <DataTypes/DataTypeDateTime64.h>
 #include <Columns/ColumnString.h>
 #include <Columns/ColumnFixedString.h>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnVector.h>
+#include <Columns/ColumnDecimal.h>
 #include <Common/typeid_cast.h>
-#include <Functions/IFunction.h>
-#include <Functions/FunctionHelpers.h>
 #include <Common/memcpySmall.h>
+#include <Functions/IFunctionImpl.h>
+#include <Functions/FunctionHelpers.h>
 
 
 namespace DB
@@ -147,7 +149,6 @@ public:
     }
 };
 
-
 template <typename ToDataType, typename Name>
 class FunctionReinterpretStringAs : public IFunction
 {
@@ -156,6 +157,7 @@ public:
     static FunctionPtr create(const Context &) { return std::make_shared<FunctionReinterpretStringAs>(); }
 
     using ToFieldType = typename ToDataType::FieldType;
+    using ColumnType = typename ToDataType::ColumnType;
 
     String getName() const override
     {
@@ -179,12 +181,12 @@ public:
     {
         if (const ColumnString * col_from = typeid_cast<const ColumnString *>(block.getByPosition(arguments[0]).column.get()))
         {
-            auto col_res = ColumnVector<ToFieldType>::create();
+            auto col_res = ColumnType::create();
 
             const ColumnString::Chars & data_from = col_from->getChars();
             const ColumnString::Offsets & offsets_from = col_from->getOffsets();
             size_t size = offsets_from.size();
-            typename ColumnVector<ToFieldType>::Container & vec_res = col_res->getData();
+            typename ColumnType::Container & vec_res = col_res->getData();
             vec_res.resize(size);
 
             size_t offset = 0;
@@ -198,12 +200,12 @@ public:
 
             block.getByPosition(result).column = std::move(col_res);
         }
-        else if (const ColumnFixedString * col_from = typeid_cast<const ColumnFixedString *>(block.getByPosition(arguments[0]).column.get()))
+        else if (const ColumnFixedString * col_from_fixed = typeid_cast<const ColumnFixedString *>(block.getByPosition(arguments[0]).column.get()))
         {
             auto col_res = ColumnVector<ToFieldType>::create();
 
-            const ColumnString::Chars & data_from = col_from->getChars();
-            size_t step = col_from->getN();
+            const ColumnString::Chars & data_from = col_from_fixed->getChars();
+            size_t step = col_from_fixed->getN();
             size_t size = data_from.size() / step;
             typename ColumnVector<ToFieldType>::Container & vec_res = col_res->getData();
             vec_res.resize(size);

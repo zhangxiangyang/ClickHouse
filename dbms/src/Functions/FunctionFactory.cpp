@@ -6,6 +6,8 @@
 
 #include <Poco/String.h>
 
+#include <IO/WriteHelpers.h>
+
 namespace DB
 {
 
@@ -23,7 +25,7 @@ void FunctionFactory::registerFunction(const
 {
     if (!functions.emplace(name, creator).second)
         throw Exception("FunctionFactory: the function name '" + name + "' is not unique",
-            ErrorCodes::LOGICAL_ERROR);
+                        ErrorCodes::LOGICAL_ERROR);
 
     String function_name_lowercase = Poco::toLower(name);
     if (isAlias(name) || isAlias(function_name_lowercase))
@@ -33,22 +35,35 @@ void FunctionFactory::registerFunction(const
     if (case_sensitiveness == CaseInsensitive
         && !case_insensitive_functions.emplace(function_name_lowercase, creator).second)
         throw Exception("FunctionFactory: the case insensitive function name '" + name + "' is not unique",
-            ErrorCodes::LOGICAL_ERROR);
+                        ErrorCodes::LOGICAL_ERROR);
 }
 
 
-FunctionBuilderPtr FunctionFactory::get(
+FunctionOverloadResolverImplPtr FunctionFactory::getImpl(
     const std::string & name,
     const Context & context) const
 {
-    auto res = tryGet(name, context);
+    auto res = tryGetImpl(name, context);
     if (!res)
-        throw Exception("Unknown function " + name, ErrorCodes::UNKNOWN_FUNCTION);
+    {
+        auto hints = this->getHints(name);
+        if (!hints.empty())
+            throw Exception("Unknown function " + name + ". Maybe you meant: " + toString(hints),
+                            ErrorCodes::UNKNOWN_FUNCTION);
+        else
+            throw Exception("Unknown function " + name, ErrorCodes::UNKNOWN_FUNCTION);
+    }
     return res;
 }
 
+FunctionOverloadResolverPtr FunctionFactory::get(
+    const std::string & name,
+    const Context & context) const
+{
+    return std::make_shared<FunctionOverloadResolverAdaptor>(getImpl(name, context));
+}
 
-FunctionBuilderPtr FunctionFactory::tryGet(
+FunctionOverloadResolverImplPtr FunctionFactory::tryGetImpl(
     const std::string & name_param,
     const Context & context) const
 {
@@ -63,6 +78,21 @@ FunctionBuilderPtr FunctionFactory::tryGet(
         return it->second(context);
 
     return {};
+}
+
+FunctionOverloadResolverPtr FunctionFactory::tryGet(
+        const std::string & name,
+        const Context & context) const
+{
+    auto impl = tryGetImpl(name, context);
+    return impl ? std::make_shared<FunctionOverloadResolverAdaptor>(std::move(impl))
+                : nullptr;
+}
+
+FunctionFactory & FunctionFactory::instance()
+{
+    static FunctionFactory ret;
+    return ret;
 }
 
 }

@@ -1,4 +1,4 @@
-#include <Functions/IFunction.h>
+#include <Functions/IFunctionImpl.h>
 #include <Functions/FunctionFactory.h>
 #include <Columns/ColumnsNumber.h>
 #include <DataTypes/DataTypesNumber.h>
@@ -25,6 +25,11 @@ public:
     String getName() const override
     {
         return name;
+    }
+
+    bool isStateful() const override
+    {
+        return true;
     }
 
     size_t getNumberOfArguments() const override

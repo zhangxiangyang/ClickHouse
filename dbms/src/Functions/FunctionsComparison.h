@@ -1,5 +1,8 @@
 #pragma once
 
+#include <Common/memcmpSmall.h>
+#include <Common/assert_cast.h>
+
 #include <Columns/ColumnsNumber.h>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnDecimal.h>
@@ -10,6 +13,7 @@
 
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeDateTime.h>
+#include <DataTypes/DataTypeDateTime64.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypeUUID.h>
@@ -17,12 +21,11 @@
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypeEnum.h>
 #include <DataTypes/getLeastSupertype.h>
-#include <DataTypes/getLeastSupertype.h>
 
 #include <Interpreters/castColumn.h>
 
 #include <Functions/FunctionsLogical.h>
-#include <Functions/IFunction.h>
+#include <Functions/IFunctionAdaptors.h>
 #include <Functions/FunctionHelpers.h>
 
 #include <Core/AccurateComparison.h>
@@ -116,30 +119,6 @@ struct NumComparisonImpl
 };
 
 
-inline int memcmp16(const void * a, const void * b)
-{
-    /// Assuming little endian.
-
-    UInt64 a_hi = __builtin_bswap64(unalignedLoad<UInt64>(a));
-    UInt64 b_hi = __builtin_bswap64(unalignedLoad<UInt64>(b));
-
-    if (a_hi < b_hi)
-        return -1;
-    if (a_hi > b_hi)
-        return 1;
-
-    UInt64 a_lo = __builtin_bswap64(unalignedLoad<UInt64>(reinterpret_cast<const char *>(a) + 8));
-    UInt64 b_lo = __builtin_bswap64(unalignedLoad<UInt64>(reinterpret_cast<const char *>(b) + 8));
-
-    if (a_lo < b_lo)
-        return -1;
-    if (a_lo > b_lo)
-        return 1;
-
-    return 0;
-}
-
-
 template <typename Op>
 struct StringComparisonImpl
 {
@@ -149,27 +128,17 @@ struct StringComparisonImpl
         PaddedPODArray<UInt8> & c)
     {
         size_t size = a_offsets.size();
+        ColumnString::Offset prev_a_offset = 0;
+        ColumnString::Offset prev_b_offset = 0;
 
         for (size_t i = 0; i < size; ++i)
         {
-            /// Trailing zero byte of the smaller string is included in the comparison.
-            size_t a_size;
-            size_t b_size;
-            int res;
-            if (i == 0)
-            {
-                a_size = a_offsets[0];
-                b_size = b_offsets[0];
-                res = memcmp(a_data.data(), b_data.data(), std::min(a_size, b_size));
-            }
-            else
-            {
-                a_size = a_offsets[i] - a_offsets[i - 1];
-                b_size = b_offsets[i] - b_offsets[i - 1];
-                res = memcmp(&a_data[a_offsets[i - 1]], &b_data[b_offsets[i - 1]], std::min(a_size, b_size));
-            }
+            c[i] = Op::apply(memcmpSmallAllowOverflow15(
+                a_data.data() + prev_a_offset, a_offsets[i] - prev_a_offset - 1,
+                b_data.data() + prev_b_offset, b_offsets[i] - prev_b_offset - 1), 0);
 
-            c[i] = Op::apply(res, 0) || (res == 0 && Op::apply(a_size, b_size));
+            prev_a_offset = a_offsets[i];
+            prev_b_offset = b_offsets[i];
         }
     }
 
@@ -179,43 +148,33 @@ struct StringComparisonImpl
         PaddedPODArray<UInt8> & c)
     {
         size_t size = a_offsets.size();
+        ColumnString::Offset prev_a_offset = 0;
+
         for (size_t i = 0; i < size; ++i)
         {
-            if (i == 0)
-            {
-                int res = memcmp(a_data.data(), b_data.data(), std::min(a_offsets[0] - 1, b_n));
-                c[i] = Op::apply(res, 0) || (res == 0 && Op::apply(a_offsets[0], b_n + 1));
-            }
-            else
-            {
-                int res = memcmp(&a_data[a_offsets[i - 1]], &b_data[i * b_n],
-                    std::min(a_offsets[i] - a_offsets[i - 1] - 1, b_n));
-                c[i] = Op::apply(res, 0) || (res == 0 && Op::apply(a_offsets[i] - a_offsets[i - 1], b_n + 1));
-            }
+            c[i] = Op::apply(memcmpSmallAllowOverflow15(
+                a_data.data() + prev_a_offset, a_offsets[i] - prev_a_offset - 1,
+                b_data.data() + i * b_n, b_n), 0);
+
+            prev_a_offset = a_offsets[i];
         }
     }
 
     static void NO_INLINE string_vector_constant(
         const ColumnString::Chars & a_data, const ColumnString::Offsets & a_offsets,
-        const std::string & b,
+        const ColumnString::Chars & b_data, ColumnString::Offset b_size,
         PaddedPODArray<UInt8> & c)
     {
         size_t size = a_offsets.size();
-        ColumnString::Offset b_size = b.size() + 1;
-        const UInt8 * b_data = reinterpret_cast<const UInt8 *>(b.data());
+        ColumnString::Offset prev_a_offset = 0;
+
         for (size_t i = 0; i < size; ++i)
         {
-            /// Trailing zero byte of the smaller string is included in the comparison.
-            if (i == 0)
-            {
-                int res = memcmp(a_data.data(), b_data, std::min(a_offsets[0], b_size));
-                c[i] = Op::apply(res, 0) || (res == 0 && Op::apply(a_offsets[0], b_size));
-            }
-            else
-            {
-                int res = memcmp(&a_data[a_offsets[i - 1]], b_data, std::min(a_offsets[i] - a_offsets[i - 1], b_size));
-                c[i] = Op::apply(res, 0) || (res == 0 && Op::apply(a_offsets[i] - a_offsets[i - 1], b_size));
-            }
+            c[i] = Op::apply(memcmpSmallAllowOverflow15(
+                a_data.data() + prev_a_offset, a_offsets[i] - prev_a_offset - 1,
+                b_data.data(), b_size), 0);
+
+            prev_a_offset = a_offsets[i];
         }
     }
 
@@ -240,13 +199,13 @@ struct StringComparisonImpl
 
     static void NO_INLINE fixed_string_vector_constant_16(
         const ColumnString::Chars & a_data,
-        const std::string & b,
+        const ColumnString::Chars & b_data,
         PaddedPODArray<UInt8> & c)
     {
         size_t size = a_data.size();
 
         for (size_t i = 0, j = 0; i < size; i += 16, ++j)
-            c[j] = Op::apply(memcmp16(&a_data[i], b.data()), 0);
+            c[j] = Op::apply(memcmp16(&a_data[i], &b_data[0]), 0);
     }
 
     static void NO_INLINE fixed_string_vector_fixed_string_vector(
@@ -254,74 +213,73 @@ struct StringComparisonImpl
         const ColumnString::Chars & b_data, ColumnString::Offset b_n,
         PaddedPODArray<UInt8> & c)
     {
-        /** Specialization if both sizes are 16.
-          * To more efficient comparison of IPv6 addresses stored in FixedString(16).
-          */
         if (a_n == 16 && b_n == 16)
         {
+            /** Specialization if both sizes are 16.
+              * To more efficient comparison of IPv6 addresses stored in FixedString(16).
+              */
             fixed_string_vector_fixed_string_vector_16(a_data, b_data, c);
+        }
+        else if (a_n == b_n)
+        {
+            size_t size = a_data.size();
+            for (size_t i = 0, j = 0; i < size; i += a_n, ++j)
+                c[j] = Op::apply(memcmpSmallAllowOverflow15(a_data.data() + i, b_data.data() + i, a_n), 0);
         }
         else
         {
-            /// Generic implementation, less efficient.
-            size_t size = a_data.size();
+            size_t size = a_data.size() / a_n;
 
-            for (size_t i = 0, j = 0; i < size; i += a_n, ++j)
-            {
-                int res = memcmp(&a_data[i], &b_data[i], std::min(a_n, b_n));
-                c[j] = Op::apply(res, 0) || (res == 0 && Op::apply(a_n, b_n));
-            }
+            for (size_t i = 0; i < size; ++i)
+                c[i] = Op::apply(memcmpSmallAllowOverflow15(a_data.data() + i * a_n, a_n, b_data.data() + i * b_n, b_n), 0);
         }
     }
 
     static void NO_INLINE fixed_string_vector_constant(
         const ColumnString::Chars & a_data, ColumnString::Offset a_n,
-        const std::string & b,
+        const ColumnString::Chars & b_data, ColumnString::Offset b_size,
         PaddedPODArray<UInt8> & c)
     {
-        ColumnString::Offset b_n = b.size();
-        if (a_n == 16 && b_n == 16)
+        if (a_n == 16 && b_size == 16)
         {
-            fixed_string_vector_constant_16(a_data, b, c);
+            fixed_string_vector_constant_16(a_data, b_data, c);
+        }
+        else if (a_n == b_size)
+        {
+            size_t size = a_data.size();
+            for (size_t i = 0, j = 0; i < size; i += a_n, ++j)
+                c[j] = Op::apply(memcmpSmallAllowOverflow15(a_data.data() + i, b_data.data(), a_n), 0);
         }
         else
         {
             size_t size = a_data.size();
-            const UInt8 * b_data = reinterpret_cast<const UInt8 *>(b.data());
             for (size_t i = 0, j = 0; i < size; i += a_n, ++j)
-            {
-                int res = memcmp(&a_data[i], b_data, std::min(a_n, b_n));
-                c[j] = Op::apply(res, 0) || (res == 0 && Op::apply(a_n, b_n));
-            }
+                c[j] = Op::apply(memcmpSmallAllowOverflow15(a_data.data() + i, a_n, b_data.data(), b_size), 0);
         }
     }
 
     static void constant_string_vector(
-        const std::string & a,
+        const ColumnString::Chars & a_data, ColumnString::Offset a_size,
         const ColumnString::Chars & b_data, const ColumnString::Offsets & b_offsets,
         PaddedPODArray<UInt8> & c)
     {
-        StringComparisonImpl<typename Op::SymmetricOp>::string_vector_constant(b_data, b_offsets, a, c);
+        StringComparisonImpl<typename Op::SymmetricOp>::string_vector_constant(b_data, b_offsets, a_data, a_size, c);
     }
 
     static void constant_fixed_string_vector(
-        const std::string & a,
+        const ColumnString::Chars & a_data, ColumnString::Offset a_size,
         const ColumnString::Chars & b_data, ColumnString::Offset b_n,
         PaddedPODArray<UInt8> & c)
     {
-        StringComparisonImpl<typename Op::SymmetricOp>::fixed_string_vector_constant(b_data, b_n, a, c);
+        StringComparisonImpl<typename Op::SymmetricOp>::fixed_string_vector_constant(b_data, b_n, a_data, a_size, c);
     }
 
     static void constant_constant(
-        const std::string & a,
-        const std::string & b,
+        const ColumnString::Chars & a_data, ColumnString::Offset a_size,
+        const ColumnString::Chars & b_data, ColumnString::Offset b_size,
         UInt8 & c)
     {
-        size_t a_n = a.size();
-        size_t b_n = b.size();
-
-        int res = memcmp(a.data(), b.data(), std::min(a_n, b_n));
-        c = Op::apply(res, 0) || (res == 0 && Op::apply(a_n, b_n));
+        c = Op::apply(memcmpSmallAllowOverflow15(a_data.data(), a_size, b_data.data(), b_size), 0);
     }
 };
 
@@ -336,11 +294,21 @@ struct StringEqualsImpl
         PaddedPODArray<UInt8> & c)
     {
         size_t size = a_offsets.size();
+        ColumnString::Offset prev_a_offset = 0;
+        ColumnString::Offset prev_b_offset = 0;
+
         for (size_t i = 0; i < size; ++i)
-            c[i] = positive == ((i == 0)
-                ? (a_offsets[0] == b_offsets[0] && !memcmp(a_data.data(), b_data.data(), a_offsets[0] - 1))
-                : (a_offsets[i] - a_offsets[i - 1] == b_offsets[i] - b_offsets[i - 1]
-                    && !memcmp(&a_data[a_offsets[i - 1]], &b_data[b_offsets[i - 1]], a_offsets[i] - a_offsets[i - 1] - 1)));
+        {
+            auto a_size = a_offsets[i] - prev_a_offset - 1;
+            auto b_size = b_offsets[i] - prev_b_offset - 1;
+
+            c[i] = positive == memequalSmallAllowOverflow15(
+                a_data.data() + prev_a_offset, a_size,
+                b_data.data() + prev_b_offset, b_size);
+
+            prev_a_offset = a_offsets[i];
+            prev_b_offset = b_offsets[i];
+        }
     }
 
     static void NO_INLINE string_vector_fixed_string_vector(
@@ -349,76 +317,65 @@ struct StringEqualsImpl
         PaddedPODArray<UInt8> & c)
     {
         size_t size = a_offsets.size();
+        ColumnString::Offset prev_a_offset = 0;
+
         for (size_t i = 0; i < size; ++i)
-            c[i] = positive == ((i == 0)
-                ? (a_offsets[0] == b_n + 1 && !memcmp(a_data.data(), b_data.data(), b_n))
-                : (a_offsets[i] - a_offsets[i - 1] == b_n + 1
-                    && !memcmp(&a_data[a_offsets[i - 1]], &b_data[b_n * i], b_n)));
+        {
+            auto a_size = a_offsets[i] - prev_a_offset - 1;
+
+            c[i] = positive == memequalSmallAllowOverflow15(
+                a_data.data() + prev_a_offset, a_size,
+                b_data.data() + b_n * i, b_n);
+
+            prev_a_offset = a_offsets[i];
+        }
     }
 
     static void NO_INLINE string_vector_constant(
         const ColumnString::Chars & a_data, const ColumnString::Offsets & a_offsets,
-        const std::string & b,
+        const ColumnString::Chars & b_data, ColumnString::Offset b_size,
         PaddedPODArray<UInt8> & c)
     {
         size_t size = a_offsets.size();
-        ColumnString::Offset b_n = b.size();
-        const UInt8 * b_data = reinterpret_cast<const UInt8 *>(b.data());
+        ColumnString::Offset prev_a_offset = 0;
+
         for (size_t i = 0; i < size; ++i)
-            c[i] = positive == ((i == 0)
-                ? (a_offsets[0] == b_n + 1 && !memcmp(a_data.data(), b_data, b_n))
-                : (a_offsets[i] - a_offsets[i - 1] == b_n + 1
-                    && !memcmp(&a_data[a_offsets[i - 1]], b_data, b_n)));
+        {
+            auto a_size = a_offsets[i] - prev_a_offset - 1;
+
+            c[i] = positive == memequalSmallAllowOverflow15(
+                a_data.data() + prev_a_offset, a_size,
+                b_data.data(), b_size);
+
+            prev_a_offset = a_offsets[i];
+        }
     }
 
-#if __SSE2__
     static void NO_INLINE fixed_string_vector_fixed_string_vector_16(
         const ColumnString::Chars & a_data,
         const ColumnString::Chars & b_data,
         PaddedPODArray<UInt8> & c)
     {
-        size_t size = c.size();
+        size_t size = a_data.size() / 16;
 
-        const __m128i * a_pos = reinterpret_cast<const __m128i *>(a_data.data());
-        const __m128i * b_pos = reinterpret_cast<const __m128i *>(b_data.data());
-        UInt8 * c_pos = c.data();
-        UInt8 * c_end = c_pos + size;
-
-        while (c_pos < c_end)
-        {
-            *c_pos = positive == (0xFFFF == _mm_movemask_epi8(_mm_cmpeq_epi8(
-                _mm_loadu_si128(a_pos),
-                _mm_loadu_si128(b_pos))));
-
-            ++a_pos;
-            ++b_pos;
-            ++c_pos;
-        }
+        for (size_t i = 0; i < size; ++i)
+            c[i] = positive == memequal16(
+                a_data.data() + i * 16,
+                b_data.data() + i * 16);
     }
 
     static void NO_INLINE fixed_string_vector_constant_16(
         const ColumnString::Chars & a_data,
-        const std::string & b,
+        const ColumnString::Chars & b_data,
         PaddedPODArray<UInt8> & c)
     {
-        size_t size = c.size();
+        size_t size = a_data.size() / 16;
 
-        const __m128i * a_pos = reinterpret_cast<const __m128i *>(a_data.data());
-        const __m128i b_value = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b.data()));
-        UInt8 * c_pos = c.data();
-        UInt8 * c_end = c_pos + size;
-
-        while (c_pos < c_end)
-        {
-            *c_pos = positive == (0xFFFF == _mm_movemask_epi8(_mm_cmpeq_epi8(
-                _mm_loadu_si128(a_pos),
-                b_value)));
-
-            ++a_pos;
-            ++c_pos;
-        }
+        for (size_t i = 0; i < size; ++i)
+            c[i] = positive == memequal16(
+                a_data.data() + i * 16,
+                b_data.data());
     }
-#endif
 
     static void NO_INLINE fixed_string_vector_fixed_string_vector(
         const ColumnString::Chars & a_data, ColumnString::Offset a_n,
@@ -428,38 +385,32 @@ struct StringEqualsImpl
         /** Specialization if both sizes are 16.
           * To more efficient comparison of IPv6 addresses stored in FixedString(16).
           */
-#if __SSE2__
         if (a_n == 16 && b_n == 16)
         {
             fixed_string_vector_fixed_string_vector_16(a_data, b_data, c);
         }
         else
-#endif
         {
-            size_t size = a_data.size();
-            for (size_t i = 0, j = 0; i < size; i += a_n, ++j)
-                c[j] = positive == (a_n == b_n && !memcmp(&a_data[i], &b_data[i], a_n));
+            size_t size = a_data.size() / a_n;
+            for (size_t i = 0; i < size; ++i)
+                c[i] = positive == memequalSmallAllowOverflow15(a_data.data() + i * a_n, a_n, b_data.data() + i * b_n, b_n);
         }
     }
 
     static void NO_INLINE fixed_string_vector_constant(
         const ColumnString::Chars & a_data, ColumnString::Offset a_n,
-        const std::string & b,
+        const ColumnString::Chars & b_data, ColumnString::Offset b_size,
         PaddedPODArray<UInt8> & c)
     {
-        ColumnString::Offset b_n = b.size();
-#if __SSE2__
-        if (a_n == 16 && b_n == 16)
+        if (a_n == 16 && b_size == 16)
         {
-            fixed_string_vector_constant_16(a_data, b, c);
+            fixed_string_vector_constant_16(a_data, b_data, c);
         }
         else
-#endif
         {
-            size_t size = a_data.size();
-            const UInt8 * b_data = reinterpret_cast<const UInt8 *>(b.data());
-            for (size_t i = 0, j = 0; i < size; i += a_n, ++j)
-                c[j] = positive == (a_n == b_n && !memcmp(&a_data[i], b_data, a_n));
+            size_t size = a_data.size() / a_n;
+            for (size_t i = 0; i < size; ++i)
+                c[i] = positive == memequalSmallAllowOverflow15(a_data.data() + i * a_n, a_n, b_data.data(), b_size);
         }
     }
 
@@ -472,27 +423,27 @@ struct StringEqualsImpl
     }
 
     static void constant_string_vector(
-        const std::string & a,
+        const ColumnString::Chars & a_data, ColumnString::Offset a_size,
         const ColumnString::Chars & b_data, const ColumnString::Offsets & b_offsets,
         PaddedPODArray<UInt8> & c)
     {
-        string_vector_constant(b_data, b_offsets, a, c);
+        string_vector_constant(b_data, b_offsets, a_data, a_size, c);
     }
 
     static void constant_fixed_string_vector(
-        const std::string & a,
+        const ColumnString::Chars & a_data, ColumnString::Offset a_size,
         const ColumnString::Chars & b_data, ColumnString::Offset b_n,
         PaddedPODArray<UInt8> & c)
     {
-        fixed_string_vector_constant(b_data, b_n, a, c);
+        fixed_string_vector_constant(b_data, b_n, a_data, a_size, c);
     }
 
     static void constant_constant(
-        const std::string & a,
-        const std::string & b,
+        const ColumnString::Chars & a_data, ColumnString::Offset a_size,
+        const ColumnString::Chars & b_data, ColumnString::Offset b_size,
         UInt8 & c)
     {
-        c = positive == (a == b);
+        c = positive == memequalSmallAllowOverflow15(a_data.data(), a_size, b_data.data(), b_size);
     }
 };
 
@@ -605,8 +556,8 @@ public:
     static constexpr auto name = Name::name;
     static FunctionPtr create(const Context & context) { return std::make_shared<FunctionComparison>(context); }
 
-    FunctionComparison(const Context & context)
-    :   context(context),
+    FunctionComparison(const Context & context_)
+    :   context(context_),
         check_decimal_overflow(decimalCheckComparisonOverflow(context))
     {}
 
@@ -734,7 +685,7 @@ private:
             return true;
         };
 
-        if (!callOnBasicTypes<true, false, true, false>(left_number, right_number, call))
+        if (!callOnBasicTypes<true, false, true, true>(left_number, right_number, call))
             throw Exception("Wrong call for " + getName() + " with " + col_left.type->getName() + " and " + col_right.type->getName(),
                             ErrorCodes::LOGICAL_ERROR);
     }
@@ -745,18 +696,62 @@ private:
         const ColumnString * c1_string = checkAndGetColumn<ColumnString>(c1);
         const ColumnFixedString * c0_fixed_string = checkAndGetColumn<ColumnFixedString>(c0);
         const ColumnFixedString * c1_fixed_string = checkAndGetColumn<ColumnFixedString>(c1);
+
         const ColumnConst * c0_const = checkAndGetColumnConstStringOrFixedString(c0);
         const ColumnConst * c1_const = checkAndGetColumnConstStringOrFixedString(c1);
 
         if (!((c0_string || c0_fixed_string || c0_const) && (c1_string || c1_fixed_string || c1_const)))
             return false;
 
+        const ColumnString::Chars * c0_const_chars = nullptr;
+        const ColumnString::Chars * c1_const_chars = nullptr;
+        ColumnString::Offset c0_const_size = 0;
+        ColumnString::Offset c1_const_size = 0;
+
+        if (c0_const)
+        {
+            const ColumnString * c0_const_string = checkAndGetColumn<ColumnString>(&c0_const->getDataColumn());
+            const ColumnFixedString * c0_const_fixed_string = checkAndGetColumn<ColumnFixedString>(&c0_const->getDataColumn());
+
+            if (c0_const_string)
+            {
+                c0_const_chars = &c0_const_string->getChars();
+                c0_const_size = c0_const_string->getDataAt(0).size;
+            }
+            else if (c0_const_fixed_string)
+            {
+                c0_const_chars = &c0_const_fixed_string->getChars();
+                c0_const_size = c0_const_fixed_string->getN();
+            }
+            else
+                throw Exception("Logical error: ColumnConst contains not String nor FixedString column", ErrorCodes::ILLEGAL_COLUMN);
+        }
+
+        if (c1_const)
+        {
+            const ColumnString * c1_const_string = checkAndGetColumn<ColumnString>(&c1_const->getDataColumn());
+            const ColumnFixedString * c1_const_fixed_string = checkAndGetColumn<ColumnFixedString>(&c1_const->getDataColumn());
+
+            if (c1_const_string)
+            {
+                c1_const_chars = &c1_const_string->getChars();
+                c1_const_size = c1_const_string->getDataAt(0).size;
+            }
+            else if (c1_const_fixed_string)
+            {
+                c1_const_chars = &c1_const_fixed_string->getChars();
+                c1_const_size = c1_const_fixed_string->getN();
+            }
+            else
+                throw Exception("Logical error: ColumnConst contains not String nor FixedString column", ErrorCodes::ILLEGAL_COLUMN);
+        }
+
         using StringImpl = StringComparisonImpl<Op<int, int>>;
 
         if (c0_const && c1_const)
         {
             UInt8 res = 0;
-            StringImpl::constant_constant(c0_const->getValue<String>(), c1_const->getValue<String>(), res);
+            StringImpl::constant_constant(*c0_const_chars, c0_const_size, *c1_const_chars, c1_const_size, res);
             block.getByPosition(result).column = block.getByPosition(result).type->createColumnConst(c0_const->size(), toField(res));
             return true;
         }
@@ -779,7 +774,7 @@ private:
             else if (c0_string && c1_const)
                 StringImpl::string_vector_constant(
                     c0_string->getChars(), c0_string->getOffsets(),
-                    c1_const->getValue<String>(),
+                    *c1_const_chars, c1_const_size,
                     c_res->getData());
             else if (c0_fixed_string && c1_string)
                 StringImpl::fixed_string_vector_string_vector(
@@ -794,16 +789,16 @@ private:
             else if (c0_fixed_string && c1_const)
                 StringImpl::fixed_string_vector_constant(
                     c0_fixed_string->getChars(), c0_fixed_string->getN(),
-                    c1_const->getValue<String>(),
+                    *c1_const_chars, c1_const_size,
                     c_res->getData());
             else if (c0_const && c1_string)
                 StringImpl::constant_string_vector(
-                    c0_const->getValue<String>(),
+                    *c0_const_chars, c0_const_size,
                     c1_string->getChars(), c1_string->getOffsets(),
                     c_res->getData());
             else if (c0_const && c1_fixed_string)
                 StringImpl::constant_fixed_string_vector(
-                    c0_const->getValue<String>(),
+                    *c0_const_chars, c0_const_size,
                     c1_fixed_string->getChars(), c1_fixed_string->getN(),
                     c_res->getData());
             else
@@ -845,7 +840,7 @@ private:
                 throw Exception("String is too long for Date: " + string_value.toString(), ErrorCodes::TOO_LARGE_STRING_SIZE);
 
             ColumnPtr parsed_const_date_holder = DataTypeDate().createColumnConst(input_rows_count, date);
-            const ColumnConst * parsed_const_date = static_cast<const ColumnConst *>(parsed_const_date_holder.get());
+            const ColumnConst * parsed_const_date = assert_cast<const ColumnConst *>(parsed_const_date_holder.get());
             executeNumLeftType<DataTypeDate::FieldType>(block, result,
                 left_is_num ? col_left_untyped : parsed_const_date,
                 left_is_num ? parsed_const_date : col_right_untyped);
@@ -859,7 +854,7 @@ private:
                 throw Exception("String is too long for DateTime: " + string_value.toString(), ErrorCodes::TOO_LARGE_STRING_SIZE);
 
             ColumnPtr parsed_const_date_time_holder = DataTypeDateTime().createColumnConst(input_rows_count, UInt64(date_time));
-            const ColumnConst * parsed_const_date_time = static_cast<const ColumnConst *>(parsed_const_date_time_holder.get());
+            const ColumnConst * parsed_const_date_time = assert_cast<const ColumnConst *>(parsed_const_date_time_holder.get());
             executeNumLeftType<DataTypeDateTime::FieldType>(block, result,
                 left_is_num ? col_left_untyped : parsed_const_date_time,
                 left_is_num ? parsed_const_date_time : col_right_untyped);
@@ -873,7 +868,7 @@ private:
                 throw Exception("String is too long for UUID: " + string_value.toString(), ErrorCodes::TOO_LARGE_STRING_SIZE);
 
             ColumnPtr parsed_const_uuid_holder = DataTypeUUID().createColumnConst(input_rows_count, uuid);
-            const ColumnConst * parsed_const_uuid = static_cast<const ColumnConst *>(parsed_const_uuid_holder.get());
+            const ColumnConst * parsed_const_uuid = assert_cast<const ColumnConst *>(parsed_const_uuid_holder.get());
             executeNumLeftType<DataTypeUUID::FieldType>(block, result,
                 left_is_num ? col_left_untyped : parsed_const_uuid,
                 left_is_num ? parsed_const_uuid : col_right_untyped);
@@ -897,7 +892,7 @@ private:
     {
         const auto type = static_cast<const EnumType *>(type_untyped);
 
-        const Field x = nearestFieldType(type->getValue(column_string->getValue<String>()));
+        const Field x = castToNearestFieldType(type->getValue(column_string->getValue<String>()));
         const auto enum_col = type->createColumnConst(input_rows_count, x);
 
         executeNumLeftType<typename EnumType::FieldType>(block, result,
@@ -939,12 +934,12 @@ private:
         if (x_const)
             x_columns = convertConstTupleToConstantElements(*x_const);
         else
-            x_columns = static_cast<const ColumnTuple &>(*c0.column).getColumns();
+            x_columns = assert_cast<const ColumnTuple &>(*c0.column).getColumnsCopy();
 
         if (y_const)
             y_columns = convertConstTupleToConstantElements(*y_const);
         else
-            y_columns = static_cast<const ColumnTuple &>(*c1.column).getColumns();
+            y_columns = assert_cast<const ColumnTuple &>(*c1.column).getColumnsCopy();
 
         for (size_t i = 0; i < tuple_size; ++i)
         {
@@ -966,8 +961,14 @@ private:
     void executeTupleEqualityImpl(Block & block, size_t result, const ColumnsWithTypeAndName & x, const ColumnsWithTypeAndName & y,
                                       size_t tuple_size, size_t input_rows_count)
     {
-        ComparisonFunction func_compare(context);
-        ConvolutionFunction func_convolution;
+        if (0 == tuple_size)
+            throw Exception("Comparison of zero-sized tuples is not implemented.", ErrorCodes::NOT_IMPLEMENTED);
+
+        auto func_compare = ComparisonFunction::create(context);
+        auto func_convolution = ConvolutionFunction::create(context);
+
+        auto func_compare_adaptor = FunctionOverloadResolverAdaptor(std::make_unique<DefaultOverloadResolver>(func_compare));
+        auto func_convolution_adaptor = FunctionOverloadResolverAdaptor(std::make_unique<DefaultOverloadResolver>(func_convolution));
 
         Block tmp_block;
         for (size_t i = 0; i < tuple_size; ++i)
@@ -975,9 +976,18 @@ private:
             tmp_block.insert(x[i]);
             tmp_block.insert(y[i]);
 
+            auto impl = func_compare_adaptor.build({x[i], y[i]});
+
             /// Comparison of the elements.
             tmp_block.insert({ nullptr, std::make_shared<DataTypeUInt8>(), "" });
-            func_compare.execute(tmp_block, {i * 3, i * 3 + 1}, i * 3 + 2, input_rows_count);
+            impl->execute(tmp_block, {i * 3, i * 3 + 1}, i * 3 + 2, input_rows_count);
+        }
+
+        if (tuple_size == 1)
+        {
+            /// Do not call AND for single-element tuple.
+            block.getByPosition(result).column = tmp_block.getByPosition(2).column;
+            return;
         }
 
         /// Logical convolution.
@@ -987,7 +997,10 @@ private:
         for (size_t i = 0; i < tuple_size; ++i)
             convolution_args[i] = i * 3 + 2;
 
-        func_convolution.execute(tmp_block, convolution_args, tuple_size * 3, input_rows_count);
+        ColumnsWithTypeAndName convolution_types(convolution_args.size(), { nullptr, std::make_shared<DataTypeUInt8>(), "" });
+        auto impl = func_convolution_adaptor.build(convolution_types);
+
+        impl->execute(tmp_block, convolution_args, tuple_size * 3, input_rows_count);
         block.getByPosition(result).column = tmp_block.getByPosition(tuple_size * 3).column;
     }
 
@@ -995,11 +1008,24 @@ private:
     void executeTupleLessGreaterImpl(Block & block, size_t result, const ColumnsWithTypeAndName & x,
                                          const ColumnsWithTypeAndName & y, size_t tuple_size, size_t input_rows_count)
     {
-        HeadComparisonFunction func_compare_head(context);
-        TailComparisonFunction func_compare_tail(context);
-        FunctionAnd func_and;
-        FunctionOr func_or;
-        FunctionComparison<EqualsOp, NameEquals> func_equals(context);
+        auto func_compare_head = HeadComparisonFunction::create(context);
+        auto func_compare_tail = TailComparisonFunction::create(context);
+        auto func_and = FunctionAnd::create(context);
+        auto func_or = FunctionOr::create(context);
+        auto func_equals = FunctionComparison<EqualsOp, NameEquals>::create(context);
+
+        auto func_compare_head_adaptor = FunctionOverloadResolverAdaptor(std::make_unique<DefaultOverloadResolver>(func_compare_head));
+        auto func_compare_tail_adaptor = FunctionOverloadResolverAdaptor(std::make_unique<DefaultOverloadResolver>(func_compare_tail));
+        auto func_equals_adaptor = FunctionOverloadResolverAdaptor(std::make_unique<DefaultOverloadResolver>(func_equals));
+
+        ColumnsWithTypeAndName bin_args = {{ nullptr, std::make_shared<DataTypeUInt8>(), "" },
+                                           { nullptr, std::make_shared<DataTypeUInt8>(), "" }};
+
+        auto func_and_adaptor = FunctionOverloadResolverAdaptor(std::make_unique<DefaultOverloadResolver>(func_and))
+                .build(bin_args);
+
+        auto func_or_adaptor = FunctionOverloadResolverAdaptor(std::make_unique<DefaultOverloadResolver>(func_or))
+                .build(bin_args);
 
         Block tmp_block;
 
@@ -1013,14 +1039,20 @@ private:
 
             if (i + 1 != tuple_size)
             {
-                func_compare_head.execute(tmp_block, {i * 4, i * 4 + 1}, i * 4 + 2, input_rows_count);
+                auto impl_head = func_compare_head_adaptor.build({x[i], y[i]});
+                impl_head->execute(tmp_block, {i * 4, i * 4 + 1}, i * 4 + 2, input_rows_count);
 
                 tmp_block.insert({ nullptr, std::make_shared<DataTypeUInt8>(), "" });
-                func_equals.execute(tmp_block, {i * 4, i * 4 + 1}, i * 4 + 3, input_rows_count);
+
+                auto impl_equals = func_equals_adaptor.build({x[i], y[i]});
+                impl_equals->execute(tmp_block, {i * 4, i * 4 + 1}, i * 4 + 3, input_rows_count);
 
             }
             else
-                func_compare_tail.execute(tmp_block, {i * 4, i * 4 + 1}, i * 4 + 2, input_rows_count);
+            {
+                auto impl_tail = func_compare_tail_adaptor.build({x[i], y[i]});
+                impl_tail->execute(tmp_block, {i * 4, i * 4 + 1}, i * 4 + 2, input_rows_count);
+            }
         }
 
         /// Combination. Complex code - make a drawing. It can be replaced by a recursive comparison of tuples.
@@ -1028,9 +1060,9 @@ private:
         while (i > 0)
         {
             tmp_block.insert({ nullptr, std::make_shared<DataTypeUInt8>(), "" });
-            func_and.execute(tmp_block, {tmp_block.columns() - 2, (i - 1) * 4 + 3}, tmp_block.columns() - 1, input_rows_count);
+            func_and_adaptor->execute(tmp_block, {tmp_block.columns() - 2, (i - 1) * 4 + 3}, tmp_block.columns() - 1, input_rows_count);
             tmp_block.insert({ nullptr, std::make_shared<DataTypeUInt8>(), "" });
-            func_or.execute(tmp_block, {tmp_block.columns() - 2, (i - 1) * 4 + 2}, tmp_block.columns() - 1, input_rows_count);
+            func_or_adaptor->execute(tmp_block, {tmp_block.columns() - 2, (i - 1) * 4 + 2}, tmp_block.columns() - 1, input_rows_count);
             --i;
         }
 
@@ -1039,8 +1071,8 @@ private:
 
     void executeGenericIdenticalTypes(Block & block, size_t result, const IColumn * c0, const IColumn * c1)
     {
-        bool c0_const = c0->isColumnConst();
-        bool c1_const = c1->isColumnConst();
+        bool c0_const = isColumnConst(*c0);
+        bool c1_const = isColumnConst(*c1);
 
         if (c0_const && c1_const)
         {
@@ -1125,12 +1157,15 @@ public:
 
         if (left_tuple && right_tuple)
         {
+            auto adaptor = FunctionOverloadResolverAdaptor(
+                    std::make_unique<DefaultOverloadResolver>(FunctionComparison<Op, Name>::create(context)));
+
             size_t size = left_tuple->getElements().size();
             for (size_t i = 0; i < size; ++i)
             {
                 ColumnsWithTypeAndName args = {{nullptr, left_tuple->getElements()[i], ""},
                                                {nullptr, right_tuple->getElements()[i], ""}};
-                getReturnType(args);
+                adaptor.build(args);
             }
         }
 
@@ -1143,13 +1178,40 @@ public:
         const auto & col_with_type_and_name_right = block.getByPosition(arguments[1]);
         const IColumn * col_left_untyped = col_with_type_and_name_left.column.get();
         const IColumn * col_right_untyped = col_with_type_and_name_right.column.get();
+
         const DataTypePtr & left_type = col_with_type_and_name_left.type;
         const DataTypePtr & right_type = col_with_type_and_name_right.type;
+
+        /// The case when arguments are the same (tautological comparison). Return constant.
+        /// NOTE: Nullable types are special case. (BTW, this function use default implementation for Nullable, so Nullable types cannot be here. Check just in case.)
+        /// NOTE: We consider NaN comparison to be implementation specific (and in our implementation NaNs are sometimes equal sometimes not).
+        if (left_type->equals(*right_type) && !left_type->isNullable() && col_left_untyped == col_right_untyped)
+        {
+            /// Always true: =, <=, >=
+            if constexpr (std::is_same_v<Op<int, int>, EqualsOp<int, int>>
+                || std::is_same_v<Op<int, int>, LessOrEqualsOp<int, int>>
+                || std::is_same_v<Op<int, int>, GreaterOrEqualsOp<int, int>>)
+            {
+                block.getByPosition(result).column = DataTypeUInt8().createColumnConst(input_rows_count, 1u);
+                return;
+            }
+            else
+            {
+                block.getByPosition(result).column = DataTypeUInt8().createColumnConst(input_rows_count, 0u);
+                return;
+            }
+        }
+
+        WhichDataType which_left{left_type};
+        WhichDataType which_right{right_type};
 
         const bool left_is_num = col_left_untyped->isNumeric();
         const bool right_is_num = col_right_untyped->isNumeric();
 
-        if (left_is_num && right_is_num)
+        bool date_and_datetime = (left_type != right_type) &&
+            which_left.isDateOrDateTime() && which_right.isDateOrDateTime();
+
+        if (left_is_num && right_is_num && !date_and_datetime)
         {
             if (!(executeNumLeftType<UInt8>(block, result, col_left_untyped, col_right_untyped)
                 || executeNumLeftType<UInt16>(block, result, col_left_untyped, col_right_untyped)
@@ -1171,9 +1233,10 @@ public:
         {
             executeTuple(block, result, col_with_type_and_name_left, col_with_type_and_name_right, input_rows_count);
         }
-        else if (isDecimal(left_type) || isDecimal(right_type))
+        else if (isColumnedAsDecimal(left_type) || isColumnedAsDecimal(right_type))
         {
-            if (!allowDecimalComparison(left_type, right_type))
+            // compare
+            if (!allowDecimalComparison(left_type, right_type) && !date_and_datetime)
                 throw Exception("No operation " + getName() + " between " + left_type->getName() + " and " + right_type->getName(),
                     ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
 
@@ -1203,7 +1266,10 @@ public:
     {
         auto isBigInteger = &typeIsEither<DataTypeInt64, DataTypeUInt64, DataTypeUUID>;
         auto isFloatingPoint = &typeIsEither<DataTypeFloat32, DataTypeFloat64>;
-        if ((isBigInteger(*types[0]) && isFloatingPoint(*types[1])) || (isBigInteger(*types[1]) && isFloatingPoint(*types[0])))
+        if ((isBigInteger(*types[0]) && isFloatingPoint(*types[1]))
+            || (isBigInteger(*types[1]) && isFloatingPoint(*types[0]))
+            || (WhichDataType(types[0]).isDate() && WhichDataType(types[1]).isDateTime())
+            || (WhichDataType(types[1]).isDate() && WhichDataType(types[0]).isDateTime()))
             return false; /// TODO: implement (double, int_N where N > double's mantissa width)
         return isCompilableType(types[0]) && isCompilableType(types[1]);
     }

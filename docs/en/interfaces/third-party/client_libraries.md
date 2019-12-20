@@ -9,6 +9,7 @@
     - [clickhouse-client](https://github.com/yurial/clickhouse-client)
     - [aiochclient](https://github.com/maximdanilchenko/aiochclient)
 - PHP
+    - [SeasClick](https://github.com/SeasX/SeasClick)
     - [phpClickHouse](https://github.com/smi2/phpClickHouse)
     - [clickhouse-php-client](https://github.com/8bitov/clickhouse-php-client)
     - [clickhouse-client](https://github.com/bozerkins/clickhouse-client)
@@ -26,12 +27,13 @@
     - [HTTP-ClickHouse](https://metacpan.org/release/HTTP-ClickHouse)
     - [AnyEvent-ClickHouse](https://metacpan.org/release/AnyEvent-ClickHouse)
 - Ruby
-    - [clickhouse (Ruby)](https://github.com/archan937/clickhouse)
+    - [ClickHouse (Ruby)](https://github.com/shlima/click_house)
 - R
     - [clickhouse-r](https://github.com/hannesmuehleisen/clickhouse-r)
     - [RClickhouse](https://github.com/IMSMWU/RClickhouse)
 - Java
     - [clickhouse-client-java](https://github.com/VirtusAI/clickhouse-client-java)
+    - [clickhouse-client](https://github.com/Ecwid/clickhouse-client)    
 - Scala
     - [clickhouse-scala-client](https://github.com/crobox/clickhouse-scala-client)
 - Kotlin
@@ -39,8 +41,6 @@
 - C#
     - [ClickHouse.Ado](https://github.com/killwort/ClickHouse-Net)
     - [ClickHouse.Net](https://github.com/ilyabreev/ClickHouse.Net)
-- C++
-    - [clickhouse-cpp](https://github.com/artpaul/clickhouse-cpp/)
 - Elixir
     - [clickhousex](https://github.com/appodeal/clickhousex/)
 - Nim

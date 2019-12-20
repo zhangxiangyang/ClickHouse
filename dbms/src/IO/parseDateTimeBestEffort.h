@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <time.h>
 
+#include <Core/Types.h>
+
 class DateLUTImpl;
 
 namespace DB
@@ -34,7 +36,7 @@ class ReadBuffer;
   * YYYYMM - 6 digits is a year, month if year was not already read
   * hhmmss - 6 digits is a time if year was already read
   *
-  * .nnnnnnn - any number of digits after point is fractional part of second, if it is not YYYY.MM.DD
+  * .nnnnnnn - any number of digits after point is fractional part of second, if it is not YYYY.MM.DD or DD.MM.YYYY
   *
   * T - means that time will follow
   *
@@ -55,5 +57,7 @@ class ReadBuffer;
 
 void parseDateTimeBestEffort(time_t & res, ReadBuffer & in, const DateLUTImpl & local_time_zone, const DateLUTImpl & utc_time_zone);
 bool tryParseDateTimeBestEffort(time_t & res, ReadBuffer & in, const DateLUTImpl & local_time_zone, const DateLUTImpl & utc_time_zone);
+void parseDateTime64BestEffort(DateTime64 & res, UInt32 scale, ReadBuffer & in, const DateLUTImpl & local_time_zone, const DateLUTImpl & utc_time_zone);
+bool tryParseDateTime64BestEffort(DateTime64 & res, UInt32 scale, ReadBuffer & in, const DateLUTImpl & local_time_zone, const DateLUTImpl & utc_time_zone);
 
 }

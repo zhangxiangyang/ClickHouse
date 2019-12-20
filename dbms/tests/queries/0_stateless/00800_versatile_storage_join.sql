@@ -37,6 +37,13 @@ SELECT '';
 SELECT joinGet('join_any_left_null', 's', number) FROM numbers(3);
 SELECT '';
 
+-- Using identifier as the first argument
+
+SELECT joinGet(join_any_left, 's', number) FROM numbers(3);
+SELECT '';
+SELECT joinGet(test.join_any_left_null, 's', number) FROM numbers(3);
+SELECT '';
+
 CREATE TABLE test.join_string_key (s String, x Array(UInt8), k UInt64) ENGINE = Join(ANY, LEFT, s);
 INSERT INTO test.join_string_key VALUES ('abc', [0], 1), ('def', [1, 2], 2);
 SELECT joinGet('join_string_key', 'x', 'abc'), joinGet('join_string_key', 'k', 'abc');
@@ -49,3 +56,16 @@ DROP TABLE test.join_any_left_null;
 DROP TABLE test.join_all_inner;
 DROP TABLE test.join_all_left;
 DROP TABLE test.join_string_key;
+
+-- test provided by Alexander Zaitsev
+DROP TABLE IF EXISTS test.join_test;
+CREATE TABLE test.join_test (a UInt8, b UInt8) Engine = Join(ANY, LEFT, a);
+
+USE test;
+select joinGet('join_test', 'b', 1);
+
+USE system;
+SELECT joinGet('test.join_test', 'b', 1);
+
+USE default;
+DROP TABLE test.join_test;

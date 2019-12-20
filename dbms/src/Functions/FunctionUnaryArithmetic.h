@@ -5,7 +5,7 @@
 #include <DataTypes/Native.h>
 #include <Columns/ColumnVector.h>
 #include <Columns/ColumnDecimal.h>
-#include <Functions/IFunction.h>
+#include <Functions/IFunctionImpl.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/castTypeToEither.h>
 #include <Common/config.h>
@@ -13,7 +13,7 @@
 #if USE_EMBEDDED_COMPILER
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-#include <llvm/IR/IRBuilder.h> // Y_IGNORE
+#include <llvm/IR/IRBuilder.h>
 #pragma GCC diagnostic pop
 #endif
 
@@ -187,7 +187,7 @@ public:
             {
                 auto & b = static_cast<llvm::IRBuilder<> &>(builder);
                 auto * v = nativeCast(b, types[0], values[0](), std::make_shared<DataTypeNumber<T1>>());
-                result = Op<T0>::compile(b, v, std::is_signed_v<T1>);
+                result = Op<T0>::compile(b, v, is_signed_v<T1>);
                 return true;
             }
             return false;

@@ -1,10 +1,12 @@
 #include "RegionsNames.h"
 
 #include <IO/WriteHelpers.h>
+#include <IO/WriteBufferFromString.h>
+#include <IO/Operators.h>
 #include <Poco/Exception.h>
-#include <Poco/Util/Application.h>
 #include <common/logger_useful.h>
 #include "GeodataProviders/INamesProvider.h"
+
 
 namespace DB
 {
@@ -17,9 +19,9 @@ namespace ErrorCodes
 
 RegionsNames::RegionsNames(IRegionsNamesDataProviderPtr data_provider)
 {
-    for (size_t language_id = 0; language_id < SUPPORTED_LANGUAGES_COUNT; ++language_id)
+    for (size_t language_id = 0; language_id < total_languages; ++language_id)
     {
-        const std::string & language = getSupportedLanguages()[language_id];
+        const std::string & language = languages[language_id];
         names_sources[language_id] = data_provider->getLanguageRegionsNamesSource(language);
     }
 
@@ -28,16 +30,14 @@ RegionsNames::RegionsNames(IRegionsNamesDataProviderPtr data_provider)
 
 std::string RegionsNames::dumpSupportedLanguagesNames()
 {
-    std::string res = "";
-    for (size_t i = 0; i < LANGUAGE_ALIASES_COUNT; ++i)
+    DB::WriteBufferFromOwnString out;
+    for (size_t i = 0; i < total_languages; ++i)
     {
         if (i > 0)
-            res += ", ";
-        res += '\'';
-        res += getLanguageAliases()[i].name;
-        res += '\'';
+            out << ", ";
+        out << '\'' << languages[i] << '\'';
     }
-    return res;
+    return out.str();
 }
 
 void RegionsNames::reload()
@@ -46,13 +46,13 @@ void RegionsNames::reload()
     LOG_DEBUG(log, "Reloading regions names");
 
     RegionID max_region_id = 0;
-    for (size_t language_id = 0; language_id < SUPPORTED_LANGUAGES_COUNT; ++language_id)
+    for (size_t language_id = 0; language_id < total_languages; ++language_id)
     {
-        const std::string & language = getSupportedLanguages()[language_id];
+        const std::string & language = languages[language_id];
 
         auto names_source = names_sources[language_id];
 
-        if (!names_source->isModified())
+        if (!names_source || !names_source->isModified())
             continue;
 
         LOG_DEBUG(log, "Reloading regions names for language: " << language);
@@ -77,7 +77,7 @@ void RegionsNames::reload()
                 throw Poco::Exception("Logical error. Maybe size estimate of " + names_source->getSourceName() + " is wrong.");
 
             new_chars.resize(old_size + name_entry.name.length() + 1);
-            memcpy(&new_chars[old_size], name_entry.name.c_str(), name_entry.name.length() + 1);
+            memcpy(new_chars.data() + old_size, name_entry.name.c_str(), name_entry.name.length() + 1);
 
             if (name_entry.id > max_region_id)
             {
@@ -92,13 +92,13 @@ void RegionsNames::reload()
             while (name_entry.id >= new_names_refs.size())
                 new_names_refs.resize(new_names_refs.size() * 2, StringRef("", 0));
 
-            new_names_refs[name_entry.id] = StringRef(&new_chars[old_size], name_entry.name.length());
+            new_names_refs[name_entry.id] = StringRef(new_chars.data() + old_size, name_entry.name.length());
         }
 
         chars[language_id].swap(new_chars);
         names_refs[language_id].swap(new_names_refs);
     }
 
-    for (size_t language_id = 0; language_id < SUPPORTED_LANGUAGES_COUNT; ++language_id)
+    for (size_t language_id = 0; language_id < total_languages; ++language_id)
         names_refs[language_id].resize(max_region_id + 1, StringRef("", 0));
 }

@@ -8,52 +8,49 @@
 #include <Columns/ColumnNullable.h>
 #include <Columns/ColumnVector.h>
 #include <Common/LRUCache.h>
-#include <Common/MemoryTracker.h>
 #include <Common/typeid_cast.h>
+#include <Common/assert_cast.h>
 #include <Common/ProfileEvents.h>
 #include <Common/Stopwatch.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/Native.h>
+#include <Functions/IFunctionAdaptors.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
 
-/** Y_IGNORE marker means that this header is not analyzed by Arcadia build system.
-  * "Arcadia" is the name of internal Yandex source code repository.
-  * ClickHouse have limited support for build in Arcadia
-  * (ClickHouse source code is used in another Yandex products as a library).
-  * Some libraries are not enabled when build inside Arcadia is used,
-  *  that what does Y_IGNORE indicate.
-  */
-
-#include <llvm/Analysis/TargetTransformInfo.h> // Y_IGNORE
-#include <llvm/Config/llvm-config.h> // Y_IGNORE
-#include <llvm/IR/BasicBlock.h> // Y_IGNORE
-#include <llvm/IR/DataLayout.h> // Y_IGNORE
-#include <llvm/IR/DerivedTypes.h> // Y_IGNORE
-#include <llvm/IR/Function.h> // Y_IGNORE
-#include <llvm/IR/IRBuilder.h> // Y_IGNORE
-#include <llvm/IR/LLVMContext.h> // Y_IGNORE
-#include <llvm/IR/Mangler.h> // Y_IGNORE
-#include <llvm/IR/Module.h> // Y_IGNORE
-#include <llvm/IR/Type.h> // Y_IGNORE
-#include <llvm/ExecutionEngine/ExecutionEngine.h> // Y_IGNORE
-#include <llvm/ExecutionEngine/JITSymbol.h> // Y_IGNORE
-#include <llvm/ExecutionEngine/SectionMemoryManager.h> // Y_IGNORE
-#include <llvm/ExecutionEngine/Orc/CompileUtils.h> // Y_IGNORE
-#include <llvm/ExecutionEngine/Orc/IRCompileLayer.h> // Y_IGNORE
-#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h> // Y_IGNORE
-#include <llvm/Target/TargetMachine.h> // Y_IGNORE
-#include <llvm/MC/SubtargetFeature.h> // Y_IGNORE
-#include <llvm/Support/DynamicLibrary.h> // Y_IGNORE
-#include <llvm/Support/Host.h> // Y_IGNORE
-#include <llvm/Support/TargetRegistry.h> // Y_IGNORE
-#include <llvm/Support/TargetSelect.h> // Y_IGNORE
-#include <llvm/Transforms/IPO/PassManagerBuilder.h> // Y_IGNORE
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Mangler.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Type.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/ExecutionEngine/ExecutionEngine.h>
+#include <llvm/ExecutionEngine/JITSymbol.h>
+#include <llvm/ExecutionEngine/SectionMemoryManager.h>
+#include <llvm/ExecutionEngine/Orc/CompileUtils.h>
+#include <llvm/ExecutionEngine/Orc/IRCompileLayer.h>
+#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/MC/SubtargetFeature.h>
+#include <llvm/Support/DynamicLibrary.h>
+#include <llvm/Support/Host.h>
+#include <llvm/Support/TargetRegistry.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Transforms/IPO/PassManagerBuilder.h>
 
 #pragma GCC diagnostic pop
+
+/// 'LegacyRTDyldObjectLinkingLayer' is deprecated: ORCv1 layers (layers with the 'Legacy' prefix) are deprecated. Please use ORCv2
+/// 'LegacyIRCompileLayer' is deprecated: ORCv1 layers (layers with the 'Legacy' prefix) are deprecated. Please use the ORCv2 IRCompileLayer instead
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 
 namespace ProfileEvents
@@ -78,7 +75,7 @@ namespace
     {
         const char * data = nullptr;
         const char * null = nullptr;
-        size_t stride;
+        size_t stride = 0;
     };
 
     struct ColumnDataPlaceholder
@@ -94,7 +91,7 @@ namespace
 static ColumnData getColumnData(const IColumn * column)
 {
     ColumnData result;
-    const bool is_const = column->isColumnConst();
+    const bool is_const = isColumnConst(*column);
     if (is_const)
         column = &reinterpret_cast<const ColumnConst *>(column)->getDataColumn();
     if (auto * nullable = typeid_cast<const ColumnNullable *>(column))
@@ -131,164 +128,92 @@ static llvm::TargetMachine * getNativeMachine()
     llvm::TargetOptions options;
     return target->createTargetMachine(
         triple, cpu, features.getString(), options, llvm::None,
-#if LLVM_VERSION_MAJOR >= 6
         llvm::None, llvm::CodeGenOpt::Default, /*jit=*/true
-#else
-        llvm::CodeModel::Default, llvm::CodeGenOpt::Default
-#endif
     );
 }
 
-#if LLVM_VERSION_MAJOR >= 7
-auto wrapJITSymbolResolver(llvm::JITSymbolResolver & jsr)
+
+struct SymbolResolver : public llvm::orc::SymbolResolver
 {
-#if USE_INTERNAL_LLVM_LIBRARY && LLVM_VERSION_PATCH == 0
-    // REMOVE AFTER contrib/llvm upgrade
-    auto flags = [&](llvm::orc::SymbolFlagsMap & flags, const llvm::orc::SymbolNameSet & symbols)
+    llvm::LegacyJITSymbolResolver & impl;
+
+    SymbolResolver(llvm::LegacyJITSymbolResolver & impl_) : impl(impl_) {}
+
+    llvm::orc::SymbolNameSet getResponsibilitySet(const llvm::orc::SymbolNameSet & symbols) final
+    {
+        return symbols;
+    }
+
+    llvm::orc::SymbolNameSet lookup(std::shared_ptr<llvm::orc::AsynchronousSymbolQuery> query, llvm::orc::SymbolNameSet symbols) final
     {
         llvm::orc::SymbolNameSet missing;
         for (const auto & symbol : symbols)
         {
-            auto resolved = jsr.lookupFlags({*symbol});
-            if (resolved && resolved->size())
-                flags.emplace(symbol, resolved->begin()->second);
-            else
-                missing.emplace(symbol);
+            bool has_resolved = false;
+            impl.lookup({*symbol}, [&](llvm::Expected<llvm::JITSymbolResolver::LookupResult> resolved)
+            {
+                if (resolved && resolved->size())
+                {
+                    query->notifySymbolMetRequiredState(symbol, resolved->begin()->second);
+                    has_resolved = true;
+                }
+            });
+
+            if (!has_resolved)
+                missing.insert(symbol);
         }
         return missing;
-    };
-#else
-    // Actually this should work for 7.0.0 but now we have OLDER 7.0.0svn in contrib
-    auto flags = [&](const llvm::orc::SymbolNameSet & symbols)
-    {
-        llvm::orc::SymbolFlagsMap flags;
-        for (const auto & symbol : symbols)
-        {
-            auto resolved = jsr.lookupFlags({*symbol});
-            if (resolved && resolved->size())
-                flags.emplace(symbol, resolved->begin()->second);
-        }
-        return flags;
-    };
-#endif
-
-    auto symbols = [&](std::shared_ptr<llvm::orc::AsynchronousSymbolQuery> query, llvm::orc::SymbolNameSet symbols)
-    {
-        llvm::orc::SymbolNameSet missing;
-        for (const auto & symbol : symbols)
-        {
-            auto resolved = jsr.lookup({*symbol});
-            if (resolved && resolved->size())
-                query->resolve(symbol, resolved->begin()->second);
-            else
-                missing.emplace(symbol);
-        }
-        return missing;
-    };
-    return llvm::orc::createSymbolResolver(flags, symbols);
-}
-#endif
-
-#if LLVM_VERSION_MAJOR >= 6
-struct CountingMMapper final : public llvm::SectionMemoryManager::MemoryMapper
-{
-    MemoryTracker memory_tracker{VariableContext::Global};
-
-    llvm::sys::MemoryBlock allocateMappedMemory(llvm::SectionMemoryManager::AllocationPurpose /*purpose*/,
-        size_t num_bytes,
-        const llvm::sys::MemoryBlock * const near_block,
-        unsigned flags,
-        std::error_code & error_code) override
-    {
-        memory_tracker.alloc(num_bytes);
-        return llvm::sys::Memory::allocateMappedMemory(num_bytes, near_block, flags, error_code);
-    }
-
-    std::error_code protectMappedMemory(const llvm::sys::MemoryBlock & block, unsigned flags) override
-    {
-        return llvm::sys::Memory::protectMappedMemory(block, flags);
-    }
-
-    std::error_code releaseMappedMemory(llvm::sys::MemoryBlock & block) override
-    {
-        memory_tracker.free(block.size());
-        return llvm::sys::Memory::releaseMappedMemory(block);
     }
 };
-#endif
+
 
 struct LLVMContext
 {
-    static inline std::atomic<size_t> id_counter{0};
-    llvm::LLVMContext context;
-#if LLVM_VERSION_MAJOR >= 7
+    std::shared_ptr<llvm::LLVMContext> context {std::make_shared<llvm::LLVMContext>()};
+    std::unique_ptr<llvm::Module> module {std::make_unique<llvm::Module>("jit", *context)};
+    std::unique_ptr<llvm::TargetMachine> machine {getNativeMachine()};
+    llvm::DataLayout layout {machine->createDataLayout()};
+    llvm::IRBuilder<> builder {*context};
+
     llvm::orc::ExecutionSession execution_session;
-    std::unique_ptr<llvm::Module> module;
-#else
-    std::shared_ptr<llvm::Module> module;
-#endif
-    std::unique_ptr<llvm::TargetMachine> machine;
-#if LLVM_VERSION_MAJOR >= 6
-    std::unique_ptr<CountingMMapper> memory_mapper;
-#endif
+
     std::shared_ptr<llvm::SectionMemoryManager> memory_manager;
-    llvm::orc::RTDyldObjectLinkingLayer object_layer;
-    llvm::orc::IRCompileLayer<decltype(object_layer), llvm::orc::SimpleCompiler> compile_layer;
-    llvm::DataLayout layout;
-    llvm::IRBuilder<> builder;
+    llvm::orc::LegacyRTDyldObjectLinkingLayer object_layer;
+    llvm::orc::LegacyIRCompileLayer<decltype(object_layer), llvm::orc::SimpleCompiler> compile_layer;
+
     std::unordered_map<std::string, void *> symbols;
-    size_t id;
 
     LLVMContext()
-#if LLVM_VERSION_MAJOR >= 7
-        : module(std::make_unique<llvm::Module>("jit", context))
-#else
-        : module(std::make_shared<llvm::Module>("jit", context))
-#endif
-        , machine(getNativeMachine())
-
-#if LLVM_VERSION_MAJOR >= 6
-        , memory_mapper(std::make_unique<CountingMMapper>())
-        , memory_manager(std::make_shared<llvm::SectionMemoryManager>(memory_mapper.get()))
-#else
-        , memory_manager(std::make_shared<llvm::SectionMemoryManager>())
-#endif
-#if LLVM_VERSION_MAJOR >= 7
+        : memory_manager(std::make_shared<llvm::SectionMemoryManager>())
         , object_layer(execution_session, [this](llvm::orc::VModuleKey)
         {
-            return llvm::orc::RTDyldObjectLinkingLayer::Resources{memory_manager, wrapJITSymbolResolver(*memory_manager)};
+            return llvm::orc::LegacyRTDyldObjectLinkingLayer::Resources{memory_manager, std::make_shared<SymbolResolver>(*memory_manager)};
         })
-#else
-        , object_layer([this]() { return memory_manager; })
-#endif
         , compile_layer(object_layer, llvm::orc::SimpleCompiler(*machine))
-        , layout(machine->createDataLayout())
-        , builder(context)
-        , id(id_counter++)
     {
         module->setDataLayout(layout);
         module->setTargetTriple(machine->getTargetTriple().getTriple());
     }
 
     /// returns used memory
-    size_t compileAllFunctionsToNativeCode()
+    void compileAllFunctionsToNativeCode()
     {
         if (!module->size())
-            return 0;
-        llvm::PassManagerBuilder builder;
+            return;
+        llvm::PassManagerBuilder pass_manager_builder;
         llvm::legacy::PassManager mpm;
         llvm::legacy::FunctionPassManager fpm(module.get());
-        builder.OptLevel = 3;
-        builder.SLPVectorize = true;
-        builder.LoopVectorize = true;
-        builder.RerollLoops = true;
-        builder.VerifyInput = true;
-        builder.VerifyOutput = true;
-        machine->adjustPassManager(builder);
+        pass_manager_builder.OptLevel = 3;
+        pass_manager_builder.SLPVectorize = true;
+        pass_manager_builder.LoopVectorize = true;
+        pass_manager_builder.RerollLoops = true;
+        pass_manager_builder.VerifyInput = true;
+        pass_manager_builder.VerifyOutput = true;
+        machine->adjustPassManager(pass_manager_builder);
         fpm.add(llvm::createTargetTransformInfoWrapperPass(machine->getTargetIRAnalysis()));
         mpm.add(llvm::createTargetTransformInfoWrapperPass(machine->getTargetIRAnalysis()));
-        builder.populateFunctionPassManager(fpm);
-        builder.populateModulePassManager(mpm);
+        pass_manager_builder.populateFunctionPassManager(fpm);
+        pass_manager_builder.populateModulePassManager(mpm);
         fpm.doInitialization();
         for (auto & function : *module)
             fpm.run(function);
@@ -300,14 +225,9 @@ struct LLVMContext
         for (const auto & function : *module)
             functions.emplace_back(function.getName());
 
-#if LLVM_VERSION_MAJOR >= 7
         llvm::orc::VModuleKey module_key = execution_session.allocateVModule();
         if (compile_layer.addModule(module_key, std::move(module)))
             throw Exception("Cannot add module to compile layer", ErrorCodes::CANNOT_COMPILE_CODE);
-#else
-        if (!compile_layer.addModule(module, memory_manager))
-            throw Exception("Cannot add module to compile layer", ErrorCodes::CANNOT_COMPILE_CODE);
-#endif
 
         for (const auto & name : functions)
         {
@@ -323,26 +243,27 @@ struct LLVMContext
                 throw Exception("Function " + name + " failed to link", ErrorCodes::CANNOT_COMPILE_CODE);
             symbols[name] = reinterpret_cast<void *>(*address);
         }
-#if LLVM_VERSION_MAJOR >= 6
-        return memory_mapper->memory_tracker.get();
-#else
-        return 0;
-#endif
     }
 };
 
-class LLVMPreparedFunction : public PreparedFunctionImpl
+
+template <typename... Ts, typename F>
+static bool castToEither(IColumn * column, F && f)
+{
+    return ((typeid_cast<Ts *>(column) ? f(*typeid_cast<Ts *>(column)) : false) || ...);
+}
+
+class LLVMExecutableFunction : public IExecutableFunctionImpl
 {
     std::string name;
-    std::shared_ptr<LLVMContext> context;
     void * function;
 
 public:
-    LLVMPreparedFunction(std::string name_, std::shared_ptr<LLVMContext> context)
-        : name(std::move(name_)), context(context)
+    LLVMExecutableFunction(const std::string & name_, const std::unordered_map<std::string, void *> & symbols)
+        : name(name_)
     {
-        auto it = context->symbols.find(name);
-        if (context->symbols.end() == it)
+        auto it = symbols.find(name);
+        if (symbols.end() == it)
             throw Exception("Cannot find symbol " + name + " in LLVMContext", ErrorCodes::LOGICAL_ERROR);
         function = it->second;
     }
@@ -353,11 +274,18 @@ public:
 
     bool useDefaultImplementationForConstants() const override { return true; }
 
-    void executeImpl(Block & block, const ColumnNumbers & arguments, size_t result, size_t block_size) override
+    void execute(Block & block, const ColumnNumbers & arguments, size_t result, size_t block_size) override
     {
-        auto col_res = block.getByPosition(result).type->createColumn()->cloneResized(block_size);
+        auto col_res = block.getByPosition(result).type->createColumn();
+
         if (block_size)
         {
+            if (!castToEither<
+                ColumnUInt8, ColumnUInt16, ColumnUInt32, ColumnUInt64,
+                ColumnInt8, ColumnInt16, ColumnInt32, ColumnInt64,
+                ColumnFloat32, ColumnFloat64>(col_res.get(), [block_size](auto & col) { col.getData().resize(block_size); return true; }))
+                throw Exception("Unexpected column in LLVMExecutableFunction: " + col_res->getName(), ErrorCodes::LOGICAL_ERROR);
+
             std::vector<ColumnData> columns(arguments.size() + 1);
             for (size_t i = 0; i < arguments.size(); ++i)
             {
@@ -369,20 +297,21 @@ public:
             columns[arguments.size()] = getColumnData(col_res.get());
             reinterpret_cast<void (*) (size_t, ColumnData *)>(function)(block_size, columns.data());
         }
+
         block.getByPosition(result).column = std::move(col_res);
     }
 };
 
-static void compileFunctionToLLVMByteCode(std::shared_ptr<LLVMContext> & context, const IFunctionBase & f)
+static void compileFunctionToLLVMByteCode(LLVMContext & context, const IFunctionBaseImpl & f)
 {
     ProfileEvents::increment(ProfileEvents::CompileFunction);
 
     auto & arg_types = f.getArgumentTypes();
-    auto & b = context->builder;
+    auto & b = context.builder;
     auto * size_type = b.getIntNTy(sizeof(size_t) * 8);
     auto * data_type = llvm::StructType::get(b.getInt8PtrTy(), b.getInt8PtrTy(), size_type);
     auto * func_type = llvm::FunctionType::get(b.getVoidTy(), { size_type, data_type->getPointerTo() }, /*isVarArg=*/false);
-    auto * func = llvm::Function::Create(func_type, llvm::Function::ExternalLinkage, f.getName(), context->module.get());
+    auto * func = llvm::Function::Create(func_type, llvm::Function::ExternalLinkage, f.getName(), context.module.get());
     auto args = func->args().begin();
     llvm::Value * counter_arg = &*args++;
     llvm::Value * columns_arg = &*args++;
@@ -468,9 +397,9 @@ static llvm::Constant * getNativeValue(llvm::Type * type, const IColumn & column
         return value ? llvm::ConstantStruct::get(static_cast<llvm::StructType *>(type), value, is_null) : nullptr;
     }
     if (type->isFloatTy())
-        return llvm::ConstantFP::get(type, static_cast<const ColumnVector<Float32> &>(column).getElement(i));
+        return llvm::ConstantFP::get(type, assert_cast<const ColumnVector<Float32> &>(column).getElement(i));
     if (type->isDoubleTy())
-        return llvm::ConstantFP::get(type, static_cast<const ColumnVector<Float64> &>(column).getElement(i));
+        return llvm::ConstantFP::get(type, assert_cast<const ColumnVector<Float64> &>(column).getElement(i));
     if (type->isIntegerTy())
         return llvm::ConstantInt::get(type, column.getUInt(i));
     /// TODO: if (type->isVectorTy())
@@ -504,12 +433,21 @@ static CompilableExpression subexpression(const IFunctionBase & f, std::vector<C
     };
 }
 
-LLVMFunction::LLVMFunction(const ExpressionActions::Actions & actions, std::shared_ptr<LLVMContext> context, const Block & sample_block)
-        : name(actions.back().result_name), context(context)
+struct LLVMModuleState
 {
+    std::unordered_map<std::string, void *> symbols;
+    std::shared_ptr<llvm::LLVMContext> major_context;
+    std::shared_ptr<llvm::SectionMemoryManager> memory_manager;
+};
+
+LLVMFunction::LLVMFunction(const ExpressionActions::Actions & actions, const Block & sample_block)
+    : name(actions.back().result_name)
+    , module_state(std::make_unique<LLVMModuleState>())
+{
+    LLVMContext context;
     for (const auto & c : sample_block)
         /// TODO: implement `getNativeValue` for all types & replace the check with `c.column && toNativeType(...)`
-        if (c.column && getNativeValue(toNativeType(context->builder, c.type), *c.column, 0))
+        if (c.column && getNativeValue(toNativeType(context.builder, c.type), *c.column, 0))
             subexpressions[c.name] = subexpression(c.column, c.type);
     for (const auto & action : actions)
     {
@@ -530,6 +468,11 @@ LLVMFunction::LLVMFunction(const ExpressionActions::Actions & actions, std::shar
         originals.push_back(action.function_base);
     }
     compileFunctionToLLVMByteCode(context, *this);
+    context.compileAllFunctionsToNativeCode();
+
+    module_state->symbols = context.symbols;
+    module_state->major_context = context.context;
+    module_state->memory_manager = context.memory_manager;
 }
 
 llvm::Value * LLVMFunction::compile(llvm::IRBuilderBase & builder, ValuePlaceholders values) const
@@ -540,8 +483,7 @@ llvm::Value * LLVMFunction::compile(llvm::IRBuilderBase & builder, ValuePlacehol
     return it->second(builder, values);
 }
 
-
-PreparedFunctionPtr LLVMFunction::prepare(const Block &, const ColumnNumbers &, size_t) const { return std::make_shared<LLVMPreparedFunction>(name, context); }
+ExecutableFunctionImplPtr LLVMFunction::prepare(const Block &, const ColumnNumbers &, size_t) const { return std::make_unique<LLVMExecutableFunction>(name, module_state->symbols); }
 
 bool LLVMFunction::isDeterministic() const
 {
@@ -622,29 +564,7 @@ static bool isCompilable(const IFunctionBase & function)
     return function.isCompilable();
 }
 
-size_t CompiledExpressionCache::weight() const
-{
-
-#if LLVM_VERSION_MAJOR >= 6
-    std::lock_guard<std::mutex> lock(mutex);
-    size_t result{0};
-    std::unordered_set<size_t> seen;
-    for (const auto & cell : cells)
-    {
-        auto function_context = cell.second.value->getContext();
-        if (!seen.count(function_context->id))
-        {
-            result += function_context->memory_mapper->memory_tracker.get();
-            seen.insert(function_context->id);
-        }
-    }
-    return result;
-#else
-    return Base::weight();
-#endif
-}
-
-std::vector<std::unordered_set<std::optional<size_t>>> getActionsDependents(const ExpressionActions::Actions & actions, const Names & output_columns)
+static std::vector<std::unordered_set<std::optional<size_t>>> getActionsDependents(const ExpressionActions::Actions & actions, const Names & output_columns)
 {
     /// an empty optional is a poisoned value prohibiting the column's producer from being removed
     /// (which it could be, if it was inlined into every dependent function).
@@ -704,7 +624,12 @@ std::vector<std::unordered_set<std::optional<size_t>>> getActionsDependents(cons
     return dependents;
 }
 
-void compileFunctions(ExpressionActions::Actions & actions, const Names & output_columns, const Block & sample_block, std::shared_ptr<CompiledExpressionCache> compilation_cache, size_t min_count_to_compile)
+void compileFunctions(
+    ExpressionActions::Actions & actions,
+    const Names & output_columns,
+    const Block & sample_block,
+    std::shared_ptr<CompiledExpressionCache> compilation_cache,
+    size_t min_count_to_compile_expression)
 {
     static std::unordered_map<UInt128, UInt32, UInt128Hash> counter;
     static std::mutex mutex;
@@ -738,36 +663,31 @@ void compileFunctions(ExpressionActions::Actions & actions, const Names & output
             auto hash_key = ExpressionActions::ActionsHash{}(fused[i]);
             {
                 std::lock_guard lock(mutex);
-                if (counter[hash_key]++ < min_count_to_compile)
+                if (counter[hash_key]++ < min_count_to_compile_expression)
                     continue;
             }
 
-            std::shared_ptr<LLVMFunction> fn;
+            FunctionBasePtr fn;
             if (compilation_cache)
             {
                 std::tie(fn, std::ignore) = compilation_cache->getOrSet(hash_key, [&inlined_func=std::as_const(fused[i]), &sample_block] ()
                 {
                     Stopwatch watch;
-                    std::shared_ptr<LLVMContext> context = std::make_shared<LLVMContext>();
-                    auto result_fn = std::make_shared<LLVMFunction>(inlined_func, context, sample_block);
-                    size_t used_memory = context->compileAllFunctionsToNativeCode();
-                    ProfileEvents::increment(ProfileEvents::CompileExpressionsBytes, used_memory);
+                    FunctionBasePtr result_fn;
+                    result_fn = std::make_shared<FunctionBaseAdaptor>(std::make_unique<LLVMFunction>(inlined_func, sample_block));
                     ProfileEvents::increment(ProfileEvents::CompileExpressionsMicroseconds, watch.elapsedMicroseconds());
                     return result_fn;
                 });
             }
             else
             {
-                std::shared_ptr<LLVMContext> context = std::make_shared<LLVMContext>();
                 Stopwatch watch;
-                fn = std::make_shared<LLVMFunction>(fused[i], context, sample_block);
-                size_t used_memory = context->compileAllFunctionsToNativeCode();
-                ProfileEvents::increment(ProfileEvents::CompileExpressionsBytes, used_memory);
+                fn = std::make_shared<FunctionBaseAdaptor>(std::make_unique<LLVMFunction>(fused[i], sample_block));
                 ProfileEvents::increment(ProfileEvents::CompileExpressionsMicroseconds, watch.elapsedMicroseconds());
             }
 
             actions[i].function_base = fn;
-            actions[i].argument_names = fn->getArgumentNames();
+            actions[i].argument_names = typeid_cast<const LLVMFunction *>(typeid_cast<const FunctionBaseAdaptor *>(fn.get())->getImpl())->getArgumentNames();
             actions[i].is_function_compiled = true;
 
             continue;

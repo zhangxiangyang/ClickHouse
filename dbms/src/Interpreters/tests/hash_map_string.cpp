@@ -15,7 +15,7 @@
 #include <Core/Types.h>
 #include <IO/ReadBufferFromFile.h>
 #include <IO/ReadHelpers.h>
-#include <IO/CompressedReadBuffer.h>
+#include <Compression/CompressedReadBuffer.h>
 #include <common/StringRef.h>
 #include <Common/HashTable/HashMap.h>
 #include <Interpreters/AggregationCommon.h>
@@ -81,10 +81,13 @@ struct DefaultHash<CompactStringRef>
 };
 
 
-#define mix(h) ({                   \
-    (h) ^= (h) >> 23;               \
-    (h) *= 0x2127599bf4325c37ULL;   \
-    (h) ^= (h) >> 47; })
+static inline UInt64 mix(UInt64 h)
+{
+    h ^= h >> 23;
+    h *= 0x2127599bf4325c37ULL;
+    h ^= h >> 47;
+    return h;
+}
 
 struct FastHash64
 {
@@ -128,7 +131,7 @@ struct FastHash64
 };
 
 
-#if __x86_64__
+#if defined(__x86_64__)
 struct CrapWow
 {
     size_t operator() (CompactStringRef x) const
@@ -274,7 +277,7 @@ struct Grower : public HashTableGrower<>
     }
 
     /// Set the buffer size by the number of elements in the hash table. Used when deserializing a hash table.
-    void set(size_t /*num_elems*/)
+    [[noreturn]] void set(size_t /*num_elems*/)
     {
         throw Poco::Exception(__PRETTY_FUNCTION__);
     }
@@ -327,15 +330,15 @@ int main(int argc, char ** argv)
         using Map = HashMapWithSavedHash<Key, Value, DefaultHash<Key>, Grower>;
 
         Map map;
-        Map::iterator it;
+        Map::LookupResult it;
         bool inserted;
 
         for (size_t i = 0; i < n; ++i)
         {
             map.emplace(data[i], it, inserted);
             if (inserted)
-                it->second = 0;
-            ++it->second;
+                it->getMapped() = 0;
+            ++it->getMapped();
         }
 
         watch.stop();
@@ -356,15 +359,15 @@ int main(int argc, char ** argv)
         using Map = HashMapWithSavedHash<Key, Value, FastHash64, Grower>;
 
         Map map;
-        Map::iterator it;
+        Map::LookupResult it;
         bool inserted;
 
         for (size_t i = 0; i < n; ++i)
         {
             map.emplace(data[i], it, inserted);
             if (inserted)
-                it->second = 0;
-            ++it->second;
+                it->getMapped() = 0;
+            ++it->getMapped();
         }
 
         watch.stop();
@@ -378,7 +381,7 @@ int main(int argc, char ** argv)
             << std::endl;
     }
 
-#if __x86_64__
+#if defined(__x86_64__)
     if (!m || m == 3)
     {
         Stopwatch watch;
@@ -386,15 +389,15 @@ int main(int argc, char ** argv)
         using Map = HashMapWithSavedHash<Key, Value, CrapWow, Grower>;
 
         Map map;
-        Map::iterator it;
+        Map::LookupResult it;
         bool inserted;
 
         for (size_t i = 0; i < n; ++i)
         {
             map.emplace(data[i], it, inserted);
             if (inserted)
-                it->second = 0;
-            ++it->second;
+                it->getMapped() = 0;
+            ++it->getMapped();
         }
 
         watch.stop();
@@ -416,15 +419,15 @@ int main(int argc, char ** argv)
         using Map = HashMapWithSavedHash<Key, Value, SimpleHash, Grower>;
 
         Map map;
-        Map::iterator it;
+        Map::LookupResult it;
         bool inserted;
 
         for (size_t i = 0; i < n; ++i)
         {
             map.emplace(data[i], it, inserted);
             if (inserted)
-                it->second = 0;
-            ++it->second;
+                it->getMapped() = 0;
+            ++it->getMapped();
         }
 
         watch.stop();

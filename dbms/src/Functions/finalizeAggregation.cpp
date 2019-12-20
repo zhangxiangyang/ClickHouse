@@ -1,4 +1,4 @@
-#include <Functions/IFunction.h>
+#include <Functions/IFunctionImpl.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
@@ -33,10 +33,17 @@ public:
         return name;
     }
 
+    bool isStateful() const override
+    {
+        return true;
+    }
+
     size_t getNumberOfArguments() const override
     {
         return 1;
     }
+
+    bool useDefaultImplementationForConstants() const override { return true; }
 
     DataTypePtr getReturnTypeImpl(const DataTypes & arguments) const override
     {

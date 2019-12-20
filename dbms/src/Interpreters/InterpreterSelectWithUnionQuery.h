@@ -3,7 +3,9 @@
 #include <Core/QueryProcessingStage.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/IInterpreter.h>
+#include <Interpreters/SelectQueryOptions.h>
 
+#include <Processors/QueryPipeline.h>
 
 namespace DB
 {
@@ -19,17 +21,21 @@ public:
     InterpreterSelectWithUnionQuery(
         const ASTPtr & query_ptr_,
         const Context & context_,
-        const Names & required_result_column_names = Names{},
-        QueryProcessingStage::Enum to_stage_ = QueryProcessingStage::Complete,
-        size_t subquery_depth_ = 0,
-        bool only_analyze = false);
+        const SelectQueryOptions &,
+        const Names & required_result_column_names = {});
 
     ~InterpreterSelectWithUnionQuery() override;
 
     BlockIO execute() override;
 
     /// Execute the query without union of streams.
-    BlockInputStreams executeWithMultipleStreams();
+    BlockInputStreams executeWithMultipleStreams(QueryPipeline & parent_pipeline);
+
+    QueryPipeline executeWithProcessors() override;
+    bool canExecuteWithProcessors() const override { return true; }
+
+    bool ignoreLimits() const override { return options.ignore_limits; }
+    bool ignoreQuota() const override { return options.ignore_quota; }
 
     Block getSampleBlock();
 
@@ -39,15 +45,18 @@ public:
 
     void ignoreWithTotals();
 
+    ASTPtr getQuery() const { return query_ptr; }
+
 private:
+    SelectQueryOptions options;
     ASTPtr query_ptr;
-    Context context;
-    QueryProcessingStage::Enum to_stage;
-    size_t subquery_depth;
+    std::shared_ptr<Context> context;
 
     std::vector<std::unique_ptr<InterpreterSelectQuery>> nested_interpreters;
 
     Block result_header;
+
+    static Block getCommonHeaderForUnion(const Blocks & headers);
 };
 
 }

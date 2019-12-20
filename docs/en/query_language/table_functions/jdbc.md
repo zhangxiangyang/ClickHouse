@@ -1,5 +1,4 @@
-
-# jdbc
+# jdbc {#table_function-jdbc}
 
 `jdbc(jdbc_connection_uri, schema, table)` - returns table that is connected via JDBC driver.
 
@@ -9,15 +8,15 @@ It supports Nullable types (based on DDL of remote table that is queried).
 
 **Examples**
 
-``` sql
+```sql
 SELECT * FROM jdbc('jdbc:mysql://localhost:3306/?user=root&password=root', 'schema', 'table')
 ```
 
-``` sql
+```sql
 SELECT * FROM jdbc('mysql://localhost:3306/?user=root&password=root', 'schema', 'table')
 ```
 
-``` sql
+```sql
 SELECT * FROM jdbc('datasource://mysql-local', 'schema', 'table')
 ```
 

@@ -10,7 +10,7 @@
 
 namespace DB
 {
-    inline void readBinary(Array & x, ReadBuffer & buf)
+    void readBinary(Array & x, ReadBuffer & buf)
     {
         size_t size;
         UInt8 type;
@@ -75,7 +75,15 @@ namespace DB
                     x.push_back(value);
                     break;
                 }
-            };
+                case Field::Types::AggregateFunctionState:
+                {
+                    AggregateFunctionStateData value;
+                    DB::readStringBinary(value.name, buf);
+                    DB::readStringBinary(value.data, buf);
+                    x.push_back(value);
+                    break;
+                }
+            }
         }
     }
 
@@ -128,7 +136,13 @@ namespace DB
                     DB::writeBinary(get<Tuple>(*it), buf);
                     break;
                 }
-            };
+                case Field::Types::AggregateFunctionState:
+                {
+                    DB::writeStringBinary(it->get<AggregateFunctionStateData>().name, buf);
+                    DB::writeStringBinary(it->get<AggregateFunctionStateData>().data, buf);
+                    break;
+                }
+            }
         }
     }
 
@@ -137,14 +151,9 @@ namespace DB
         DB::String res = applyVisitor(DB::FieldVisitorToString(), DB::Field(x));
         buf.write(res.data(), res.size());
     }
-}
 
-
-namespace DB
-{
-    inline void readBinary(Tuple & x_def, ReadBuffer & buf)
+    void readBinary(Tuple & x, ReadBuffer & buf)
     {
-        auto & x = x_def.toUnderType();
         size_t size;
         DB::readBinary(size, buf);
 
@@ -209,13 +218,20 @@ namespace DB
                     x.push_back(value);
                     break;
                 }
-            };
+                case Field::Types::AggregateFunctionState:
+                {
+                    AggregateFunctionStateData value;
+                    DB::readStringBinary(value.name, buf);
+                    DB::readStringBinary(value.data, buf);
+                    x.push_back(value);
+                    break;
+                }
+            }
         }
     }
 
-    void writeBinary(const Tuple & x_def, WriteBuffer & buf)
+    void writeBinary(const Tuple & x, WriteBuffer & buf)
     {
-        auto & x = x_def.toUnderType();
         const size_t size = x.size();
         DB::writeBinary(size, buf);
 
@@ -262,31 +278,27 @@ namespace DB
                     DB::writeBinary(get<Tuple>(*it), buf);
                     break;
                 }
-            };
+                case Field::Types::AggregateFunctionState:
+                {
+                    DB::writeStringBinary(it->get<AggregateFunctionStateData>().name, buf);
+                    DB::writeStringBinary(it->get<AggregateFunctionStateData>().data, buf);
+                    break;
+                }
+            }
         }
     }
 
     void writeText(const Tuple & x, WriteBuffer & buf)
     {
-        DB::String res = applyVisitor(DB::FieldVisitorToString(), DB::Field(x));
+        writeFieldText(DB::Field(x), buf);
+    }
+
+    void writeFieldText(const Field & x, WriteBuffer & buf)
+    {
+        DB::String res = Field::dispatch(DB::FieldVisitorToString(), x);
         buf.write(res.data(), res.size());
     }
 
-
-    template <> Decimal32 DecimalField<Decimal32>::getScaleMultiplier() const
-    {
-        return DataTypeDecimal<Decimal32>::getScaleMultiplier(scale);
-    }
-
-    template <> Decimal64 DecimalField<Decimal64>::getScaleMultiplier() const
-    {
-        return DataTypeDecimal<Decimal64>::getScaleMultiplier(scale);
-    }
-
-    template <> Decimal128 DecimalField<Decimal128>::getScaleMultiplier() const
-    {
-        return DataTypeDecimal<Decimal128>::getScaleMultiplier(scale);
-    }
 
     template <typename T>
     static bool decEqual(T x, T y, UInt32 x_scale, UInt32 y_scale)

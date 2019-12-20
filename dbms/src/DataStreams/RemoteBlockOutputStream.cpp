@@ -6,6 +6,7 @@
 #include <Common/NetException.h>
 #include <Common/CurrentThread.h>
 #include <Interpreters/InternalTextLogsQueue.h>
+#include <IO/ConnectionTimeouts.h>
 
 
 namespace DB
@@ -18,17 +19,20 @@ namespace ErrorCodes
 }
 
 
-RemoteBlockOutputStream::RemoteBlockOutputStream(Connection & connection_, const String & query_, const Settings * settings_)
+RemoteBlockOutputStream::RemoteBlockOutputStream(Connection & connection_,
+                                                 const ConnectionTimeouts & timeouts,
+                                                 const String & query_,
+                                                 const Settings * settings_)
     : connection(connection_), query(query_), settings(settings_)
 {
     /** Send query and receive "header", that describe table structure.
       * Header is needed to know, what structure is required for blocks to be passed to 'write' method.
       */
-    connection.sendQuery(query, "", QueryProcessingStage::Complete, settings, nullptr);
+    connection.sendQuery(timeouts, query, "", QueryProcessingStage::Complete, settings, nullptr);
 
     while (true)
     {
-        Connection::Packet packet = connection.receivePacket();
+        Packet packet = connection.receivePacket();
 
         if (Protocol::Server::Data == packet.type)
         {
@@ -45,6 +49,11 @@ RemoteBlockOutputStream::RemoteBlockOutputStream(Connection & connection_, const
             /// Pass logs from remote server to client
             if (auto log_queue = CurrentThread::getInternalTextLogsQueue())
                 log_queue->pushBlock(std::move(packet.block));
+        }
+        else if (Protocol::Server::TableColumns == packet.type)
+        {
+            /// Server could attach ColumnsDescription in front of stream for column defaults. There's no need to pass it through cause
+            /// client's already got this information for remote table. Ignore.
         }
         else
             throw NetException("Unexpected packet from server (expected Data or Exception, got "
@@ -68,7 +77,7 @@ void RemoteBlockOutputStream::write(const Block & block)
         auto packet_type = connection.checkPacket();
         if (packet_type && *packet_type == Protocol::Server::Exception)
         {
-            Connection::Packet packet = connection.receivePacket();
+            Packet packet = connection.receivePacket();
             packet.exception->rethrow();
         }
 
@@ -92,7 +101,7 @@ void RemoteBlockOutputStream::writeSuffix()
     /// Wait for EndOfStream or Exception packet, skip Log packets.
     while (true)
     {
-        Connection::Packet packet = connection.receivePacket();
+        Packet packet = connection.receivePacket();
 
         if (Protocol::Server::EndOfStream == packet.type)
             break;

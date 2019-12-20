@@ -1,7 +1,10 @@
 #pragma once
 
+#include <Columns/IColumn.h>
+#include <DataStreams/IBlockStream_fwd.h>
+
 #include <vector>
-#include <DataStreams/IBlockInputStream.h>
+
 
 namespace DB
 {

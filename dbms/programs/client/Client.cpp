@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <optional>
+#include <ext/scope_guard.h>
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <Poco/String.h>
@@ -41,6 +42,7 @@
 #include <IO/ReadBufferFromString.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
+#include <IO/Operators.h>
 #include <IO/UseSSL.h>
 #include <DataStreams/AsynchronousBlockInputStream.h>
 #include <DataStreams/AddingDefaultsBlockInputStream.h>
@@ -56,15 +58,19 @@
 #include <Parsers/formatAST.h>
 #include <Parsers/parseQuery.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/InterpreterSetQuery.h>
+#include <Interpreters/ReplaceQueryParameterVisitor.h>
 #include <Client/Connection.h>
 #include <Common/InterruptListener.h>
 #include <Functions/registerFunctions.h>
 #include <AggregateFunctions/registerAggregateFunctions.h>
 #include <Common/Config/configReadClient.h>
 #include <Storages/ColumnsDescription.h>
+#include <common/argsToConfig.h>
+#include <Common/TerminalSize.h>
 
 #if USE_READLINE
-#include "Suggest.h" // Y_IGNORE
+#include "Suggest.h"
 #endif
 
 #ifndef __clang__
@@ -74,14 +80,47 @@
 /// http://en.wikipedia.org/wiki/ANSI_escape_code
 
 /// Similar codes \e[s, \e[u don't work in VT100 and Mosh.
-#define SAVE_CURSOR_POSITION "\e7"
-#define RESTORE_CURSOR_POSITION "\e8"
+#define SAVE_CURSOR_POSITION "\033""7"
+#define RESTORE_CURSOR_POSITION "\033""8"
 
 #define CLEAR_TO_END_OF_LINE "\033[K"
 
 /// This codes are possibly not supported everywhere.
 #define DISABLE_LINE_WRAPPING "\033[?7l"
 #define ENABLE_LINE_WRAPPING "\033[?7h"
+
+#if USE_READLINE && RL_VERSION_MAJOR >= 7
+
+#define BRACK_PASTE_PREF "\033[200~"
+#define BRACK_PASTE_SUFF "\033[201~"
+
+#define BRACK_PASTE_LAST '~'
+#define BRACK_PASTE_SLEN 6
+
+/// This handler bypasses some unused macro/event checkings.
+static int clickhouse_rl_bracketed_paste_begin(int /* count */, int /* key */)
+{
+    std::string buf;
+    buf.reserve(128);
+
+    RL_SETSTATE(RL_STATE_MOREINPUT);
+    SCOPE_EXIT(RL_UNSETSTATE(RL_STATE_MOREINPUT));
+    int c;
+    while ((c = rl_read_key()) >= 0)
+    {
+        if (c == '\r')
+            c = '\n';
+        buf.push_back(c);
+        if (buf.size() >= BRACK_PASTE_SLEN && c == BRACK_PASTE_LAST && buf.substr(buf.size() - BRACK_PASTE_SLEN) == BRACK_PASTE_SUFF)
+        {
+            buf.resize(buf.size() - BRACK_PASTE_SLEN);
+            break;
+        }
+    }
+    return static_cast<size_t>(rl_insert_text(buf.c_str())) == buf.size() ? 0 : 1;
+}
+
+#endif
 
 namespace DB
 {
@@ -99,6 +138,8 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
     extern const int CANNOT_SET_SIGNAL_HANDLER;
     extern const int CANNOT_READLINE;
+    extern const int SYSTEM_ERROR;
+    extern const int INVALID_USAGE_OF_INPUT;
 }
 
 
@@ -124,7 +165,7 @@ private:
     bool print_time_to_stderr = false;   /// Output execution time to stderr in batch mode.
     bool stdin_is_not_tty = false;       /// stdin is not a terminal.
 
-    winsize terminal_size {};            /// Terminal size is needed to render progress bar.
+    uint16_t terminal_width = 0;         /// Terminal width is needed to render progress bar.
 
     std::unique_ptr<Connection> connection;    /// Connection to DB.
     String query_id;                     /// Current query_id.
@@ -197,8 +238,10 @@ private:
     /// External tables info.
     std::list<ExternalTable> external_tables;
 
-    ConnectionParameters connection_parameters;
+    /// Dictionary with query parameters for prepared statements.
+    NameToNameMap query_parameters;
 
+    ConnectionParameters connection_parameters;
 
     void initialize(Poco::Util::Application & self)
     {
@@ -210,15 +253,21 @@ private:
 
         configReadClient(config(), home_path);
 
+        context.makeGlobalContext();
         context.setApplicationType(Context::ApplicationType::CLIENT);
+        context.setQueryParameters(query_parameters);
 
         /// settings and limits could be specified in config file, but passed settings has higher priority
-#define EXTRACT_SETTING(TYPE, NAME, DEFAULT, DESCRIPTION) \
-        if (config().has(#NAME) && !context.getSettingsRef().NAME.changed) \
-            context.setSetting(#NAME, config().getString(#NAME));
-        APPLY_FOR_SETTINGS(EXTRACT_SETTING)
-#undef EXTRACT_SETTING
+        for (auto && setting : context.getSettingsRef())
+        {
+            const String & name = setting.getName().toString();
+            if (config().has(name) && !setting.isChanged())
+                setting.setValue(config().getString(name));
+        }
 
+        /// Set path for format schema files
+        if (config().has("format_schema_path"))
+            context.setFormatSchemaPath(Poco::Path(config().getString("format_schema_path")).toString());
     }
 
 
@@ -290,7 +339,6 @@ private:
         ///   The value of the option is used as the text of query (or of multiple queries).
         ///   If stdin is not a terminal, INSERT data for the first query is read from it.
         /// - stdin is not a terminal. In this case queries are read from it.
-        stdin_is_not_tty = !isatty(STDIN_FILENO);
         if (stdin_is_not_tty || config().has("query"))
             is_interactive = false;
 
@@ -329,7 +377,7 @@ private:
         DateLUT::instance();
         if (!context.getSettingsRef().use_client_time_zone)
         {
-            const auto & time_zone = connection->getServerTimezone();
+            const auto & time_zone = connection->getServerTimezone(connection_parameters.timeouts);
             if (!time_zone.empty())
             {
                 try
@@ -396,6 +444,7 @@ private:
                 throw Exception("time option could be specified only in non-interactive mode", ErrorCodes::BAD_ARGUMENTS);
 
 #if USE_READLINE
+            SCOPE_EXIT({ Suggest::instance().finalize(); });
             if (server_revision >= Suggest::MIN_SERVER_REVISION
                 && !config().getBool("disable_suggestion", false))
             {
@@ -417,8 +466,14 @@ private:
             /// Load command history if present.
             if (config().has("history_file"))
                 history_file = config().getString("history_file");
-            else if (!home_path.empty())
-                history_file = home_path + "/.clickhouse-client-history";
+            else
+            {
+                auto history_file_from_env = getenv("CLICKHOUSE_HISTORY_FILE");
+                if (history_file_from_env)
+                    history_file = history_file_from_env;
+                else if (!home_path.empty())
+                    history_file = home_path + "/.clickhouse-client-history";
+            }
 
             if (!history_file.empty())
             {
@@ -427,7 +482,7 @@ private:
 #if USE_READLINE
                     int res = read_history(history_file.c_str());
                     if (res)
-                        throwFromErrno("Cannot read history from file " + history_file, ErrorCodes::CANNOT_READ_HISTORY);
+                        std::cerr << "Cannot read history from file " + history_file + ": "+ errnoToString(ErrorCodes::CANNOT_READ_HISTORY);
 #endif
                 }
                 else    /// Create history file.
@@ -439,6 +494,24 @@ private:
 
             if (rl_initialize())
                 throw Exception("Cannot initialize readline", ErrorCodes::CANNOT_READLINE);
+
+#if RL_VERSION_MAJOR >= 7
+            /// Enable bracketed-paste-mode only when multiquery is enabled and multiline is
+            ///  disabled, so that we are able to paste and execute multiline queries in a whole
+            ///  instead of erroring out, while be less intrusive.
+            if (config().has("multiquery") && !config().has("multiline"))
+            {
+                /// When bracketed paste mode is set, pasted text is bracketed with control sequences so
+                ///  that the program can differentiate pasted text from typed-in text. This helps
+                ///  clickhouse-client so that without -m flag, one can still paste multiline queries, and
+                ///  possibly get better pasting performance. See https://cirw.in/blog/bracketed-paste for
+                ///  more details.
+                rl_variable_bind("enable-bracketed-paste", "on");
+
+                /// Use our bracketed paste handler to get better user experience. See comments above.
+                rl_bind_keyseq(BRACK_PASTE_PREF, clickhouse_rl_bracketed_paste_begin);
+            }
+#endif
 
             auto clear_prompt_or_exit = [](int)
             {
@@ -472,6 +545,17 @@ private:
         }
         else
         {
+            /// This is intended for testing purposes.
+            if (config().getBool("always_load_suggestion_data", false))
+            {
+#if USE_READLINE
+                SCOPE_EXIT({ Suggest::instance().finalize(); });
+                Suggest::instance().load(connection_parameters, config().getInt("suggestion_limit"));
+#else
+                throw Exception("Command line suggestions cannot work without readline", ErrorCodes::BAD_ARGUMENTS);
+#endif
+            }
+
             query_id = config().getString("query_id", "");
             nonInteractive();
 
@@ -501,7 +585,6 @@ private:
             connection_parameters.default_database,
             connection_parameters.user,
             connection_parameters.password,
-            connection_parameters.timeouts,
             "client",
             connection_parameters.compression,
             connection_parameters.security);
@@ -517,11 +600,14 @@ private:
             connection->setThrottler(throttler);
         }
 
-        connection->getServerVersion(server_name, server_version_major, server_version_minor, server_version_patch, server_revision);
+        connection->getServerVersion(connection_parameters.timeouts,
+                                     server_name, server_version_major, server_version_minor, server_version_patch, server_revision);
 
         server_version = toString(server_version_major) + "." + toString(server_version_minor) + "." + toString(server_version_patch);
 
-        if (server_display_name = connection->getServerDisplayName(); server_display_name.length() == 0)
+        if (
+            server_display_name = connection->getServerDisplayName(connection_parameters.timeouts);
+            server_display_name.length() == 0)
         {
             server_display_name = config().getString("host", "localhost");
         }
@@ -529,9 +615,17 @@ private:
         if (is_interactive)
         {
             std::cout << "Connected to " << server_name
-                      << " server version " << server_version
-                      << " revision " << server_revision
-                      << "." << std::endl << std::endl;
+                << " server version " << server_version
+                << " revision " << server_revision
+                << "." << std::endl << std::endl;
+
+            if (std::make_tuple(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)
+                < std::make_tuple(server_version_major, server_version_minor, server_version_patch))
+            {
+                std::cout << "ClickHouse client version is older than ClickHouse server. "
+                    << "It may lack support for new features."
+                    << std::endl << std::endl;
+            }
         }
     }
 
@@ -554,10 +648,10 @@ private:
 
     void loop()
     {
-        String query;
-        String prev_query;
+        String input;
+        String prev_input;
 
-        while (char * line_ = readline(query.empty() ? prompt().c_str() : ":-] "))
+        while (char * line_ = readline(input.empty() ? prompt().c_str() : ":-] "))
         {
             String line = line_;
             free(line_);
@@ -577,37 +671,36 @@ private:
             if (ends_with_backslash)
                 line = line.substr(0, ws - 1);
 
-            query += line;
+            input += line;
 
             if (!ends_with_backslash && (ends_with_semicolon || has_vertical_output_suffix || (!config().has("multiline") && !hasDataInSTDIN())))
             {
-                if (query != prev_query)
+                // TODO: should we do sensitive data masking on client too? History file can be source of secret leaks.
+                if (input != prev_input)
                 {
                     /// Replace line breaks with spaces to prevent the following problem.
                     /// Every line of multi-line query is saved to history file as a separate line.
                     /// If the user restarts the client then after pressing the "up" button
                     /// every line of the query will be displayed separately.
-                    std::string logged_query = query;
-                    std::replace(logged_query.begin(), logged_query.end(), '\n', ' ');
+                    std::string logged_query = input;
+                    if (config().has("multiline"))
+                        std::replace(logged_query.begin(), logged_query.end(), '\n', ' ');
                     add_history(logged_query.c_str());
 
 #if USE_READLINE && HAVE_READLINE_HISTORY
                     if (!history_file.empty() && append_history(1, history_file.c_str()))
-                        throwFromErrno("Cannot append history to file " + history_file, ErrorCodes::CANNOT_APPEND_HISTORY);
+                        std::cerr << "Cannot append history to file " + history_file + ": " + errnoToString(ErrorCodes::CANNOT_APPEND_HISTORY);
 #endif
 
-                    prev_query = query;
+                    prev_input = input;
                 }
 
                 if (has_vertical_output_suffix)
-                    query = query.substr(0, query.length() - 2);
+                    input = input.substr(0, input.length() - 2);
 
                 try
                 {
-                    /// Determine the terminal size.
-                    ioctl(0, TIOCGWINSZ, &terminal_size);
-
-                    if (!process(query))
+                    if (!process(input))
                         break;
                 }
                 catch (const Exception & e)
@@ -633,11 +726,11 @@ private:
                     connect();
                 }
 
-                query = "";
+                input = "";
             }
             else
             {
-                query += '\n';
+                input += '\n';
             }
         }
     }
@@ -648,7 +741,7 @@ private:
         String text;
 
         if (config().has("query"))
-            text = config().getString("query");
+            text = config().getRawString("query");  /// Poco configuration should not process substitutions in form of ${...} inside query.
         else
         {
             /// If 'query' parameter is not set, read a query from stdin.
@@ -663,13 +756,20 @@ private:
 
     bool process(const String & text)
     {
+        if (exit_strings.end() != exit_strings.find(trim(text, [](char c){ return isWhitespaceASCII(c) || c == ';'; })))
+            return false;
+
         const bool test_mode = config().has("testmode");
         if (config().has("multiquery"))
         {
+            {   /// disable logs if expects errors
+                TestHint test_hint(test_mode, text);
+                if (test_hint.clientError() || test_hint.serverError())
+                    process("SET send_logs_level = 'none'");
+            }
+
             /// Several queries separated by ';'.
             /// INSERT data is ended by the end of line, not ';'.
-
-            String query;
 
             const char * begin = text.data();
             const char * end = begin + text.size();
@@ -684,7 +784,7 @@ private:
                     if (ignore_error)
                     {
                         Tokens tokens(begin, end);
-                        TokenIterator token_iterator(tokens);
+                        IParser::Pos token_iterator(tokens);
                         while (token_iterator->type != TokenType::Semicolon && token_iterator.isValid())
                             ++token_iterator;
                         begin = token_iterator->end;
@@ -694,7 +794,7 @@ private:
                     return true;
                 }
 
-                ASTInsertQuery * insert = typeid_cast<ASTInsertQuery *>(ast.get());
+                auto * insert = ast->as<ASTInsertQuery>();
 
                 if (insert && insert->data)
                 {
@@ -702,19 +802,23 @@ private:
                     insert->end = pos;
                 }
 
-                query = text.substr(begin - text.data(), pos - begin);
+                String str = text.substr(begin - text.data(), pos - begin);
 
                 begin = pos;
                 while (isWhitespaceASCII(*begin) || *begin == ';')
                     ++begin;
 
-                TestHint test_hint(test_mode, query);
+                TestHint test_hint(test_mode, str);
                 expected_client_error = test_hint.clientError();
                 expected_server_error = test_hint.serverError();
 
                 try
                 {
-                    if (!processSingleQuery(query, ast) && !ignore_error)
+                    auto ast_to_process = ast;
+                    if (insert && insert->data)
+                        ast_to_process = nullptr;
+
+                    if (!processSingleQuery(str, ast_to_process) && !ignore_error)
                         return false;
                 }
                 catch (...)
@@ -722,12 +826,12 @@ private:
                     last_exception = std::make_unique<Exception>(getCurrentExceptionMessage(true), getCurrentExceptionCode());
                     actual_client_error = last_exception->code();
                     if (!ignore_error && (!actual_client_error || actual_client_error != expected_client_error))
-                        std::cerr << "Error on processing query: " << query << std::endl << last_exception->message();
+                        std::cerr << "Error on processing query: " << str << std::endl << last_exception->message();
                     got_exception = true;
                 }
 
                 if (!test_hint.checkActual(actual_server_error, actual_client_error, got_exception, last_exception))
-                    connection->forceConnected();
+                    connection->forceConnected(connection_parameters.timeouts);
 
                 if (got_exception && !ignore_error)
                 {
@@ -749,9 +853,6 @@ private:
 
     bool processSingleQuery(const String & line, ASTPtr parsed_query_ = nullptr)
     {
-        if (exit_strings.end() != exit_strings.find(trim(line, [](char c){ return isWhitespaceASCII(c) || c == ';'; })))
-            return false;
-
         resetOutput();
         got_exception = false;
 
@@ -769,7 +870,6 @@ private:
         /// Some parts of a query (result output and formatting) are executed client-side.
         /// Thus we need to parse the query.
         parsed_query = parsed_query_;
-
         if (!parsed_query)
         {
             const char * begin = query.data();
@@ -785,22 +885,45 @@ private:
         written_progress_chars = 0;
         written_first_block = false;
 
-        const ASTSetQuery * set_query = typeid_cast<const ASTSetQuery *>(&*parsed_query);
-        const ASTUseQuery * use_query = typeid_cast<const ASTUseQuery *>(&*parsed_query);
-        /// INSERT query for which data transfer is needed (not an INSERT SELECT) is processed separately.
-        const ASTInsertQuery * insert = typeid_cast<const ASTInsertQuery *>(&*parsed_query);
+        {
+            /// Temporarily apply query settings to context.
+            std::optional<Settings> old_settings;
+            SCOPE_EXIT({ if (old_settings) context.setSettings(*old_settings); });
+            auto apply_query_settings = [&](const IAST & settings_ast)
+            {
+                if (!old_settings)
+                    old_settings.emplace(context.getSettingsRef());
+                context.applySettingsChanges(settings_ast.as<ASTSetQuery>()->changes);
+            };
+            const auto * insert = parsed_query->as<ASTInsertQuery>();
+            if (insert && insert->settings_ast)
+                apply_query_settings(*insert->settings_ast);
+            /// FIXME: try to prettify this cast using `as<>()`
+            const auto * with_output = dynamic_cast<const ASTQueryWithOutput *>(parsed_query.get());
+            if (with_output && with_output->settings_ast)
+                apply_query_settings(*with_output->settings_ast);
 
-        connection->forceConnected();
+            connection->forceConnected(connection_parameters.timeouts);
 
-        if (insert && !insert->select)
-            processInsertQuery();
-        else
-            processOrdinaryQuery();
+            ASTPtr input_function;
+            if (insert && insert->select)
+                insert->tryFindInputFunction(input_function);
+
+            /// INSERT query for which data transfer is needed (not an INSERT SELECT or input()) is processed separately.
+            if (insert && (!insert->select || input_function))
+            {
+                if (input_function && insert->format.empty())
+                    throw Exception("FORMAT must be specified for function input()", ErrorCodes::INVALID_USAGE_OF_INPUT);
+                processInsertQuery();
+            }
+            else
+                processOrdinaryQuery();
+        }
 
         /// Do not change context (current DB, settings) in case of an exception.
         if (!got_exception)
         {
-            if (set_query)
+            if (const auto * set_query = parsed_query->as<ASTSetQuery>())
             {
                 /// Save all changes in settings to avoid losing them if the connection is lost.
                 for (const auto & change : set_query->changes)
@@ -808,11 +931,11 @@ private:
                     if (change.name == "profile")
                         current_profile = change.value.safeGet<String>();
                     else
-                        context.setSetting(change.name, change.value);
+                        context.applySettingChange(change);
                 }
             }
 
-            if (use_query)
+            if (const auto * use_query = parsed_query->as<ASTUseQuery>())
             {
                 const String & new_database = use_query->database;
                 /// If the client initiates the reconnection, it takes the settings from the config.
@@ -827,7 +950,7 @@ private:
             std::cout << std::endl
                 << processed_rows << " rows in set. Elapsed: " << watch.elapsedSeconds() << " sec. ";
 
-            if (progress.rows >= 1000)
+            if (progress.read_rows >= 1000)
                 writeFinalProgress();
 
             std::cout << std::endl << std::endl;
@@ -844,7 +967,7 @@ private:
     /// Convert external tables to ExternalTableData and send them using the connection.
     void sendExternalTables()
     {
-        auto * select = typeid_cast<const ASTSelectWithUnionQuery *>(&*parsed_query);
+        const auto * select = parsed_query->as<ASTSelectWithUnionQuery>();
         if (!select && !external_tables.empty())
             throw Exception("External tables could be sent only with select query", ErrorCodes::BAD_ARGUMENTS);
 
@@ -856,20 +979,30 @@ private:
     }
 
 
-    /// Process the query that doesn't require transfering data blocks to the server.
+    /// Process the query that doesn't require transferring data blocks to the server.
     void processOrdinaryQuery()
     {
-        connection->sendQuery(query, query_id, QueryProcessingStage::Complete, &context.getSettingsRef(), nullptr, true);
+        /// We will always rewrite query (even if there are no query_parameters) because it will help to find errors in query formatter.
+        {
+            /// Replace ASTQueryParameter with ASTLiteral for prepared statements.
+            ReplaceQueryParameterVisitor visitor(query_parameters);
+            visitor.visit(parsed_query);
+
+            /// Get new query after substitutions. Note that it cannot be done for INSERT query with embedded data.
+            query = serializeAST(*parsed_query);
+        }
+
+        connection->sendQuery(connection_parameters.timeouts, query, query_id, QueryProcessingStage::Complete, &context.getSettingsRef(), nullptr, true);
         sendExternalTables();
         receiveResult();
     }
 
 
-    /// Process the query that requires transfering data blocks to the server.
+    /// Process the query that requires transferring data blocks to the server.
     void processInsertQuery()
     {
         /// Send part of query without data, because data will be sent separately.
-        const ASTInsertQuery & parsed_insert_query = typeid_cast<const ASTInsertQuery &>(*parsed_query);
+        const auto & parsed_insert_query = parsed_query->as<ASTInsertQuery &>();
         String query_without_data = parsed_insert_query.data
             ? query.substr(0, parsed_insert_query.data - query.data())
             : query;
@@ -877,7 +1010,7 @@ private:
         if (!parsed_insert_query.data && (is_interactive || (stdin_is_not_tty && std_in.eof())))
             throw Exception("No data to insert", ErrorCodes::NO_DATA_TO_INSERT);
 
-        connection->sendQuery(query_without_data, query_id, QueryProcessingStage::Complete, &context.getSettingsRef(), nullptr, true);
+        connection->sendQuery(connection_parameters.timeouts, query_without_data, query_id, QueryProcessingStage::Complete, &context.getSettingsRef(), nullptr, true);
         sendExternalTables();
 
         /// Receive description of table structure.
@@ -897,8 +1030,6 @@ private:
     {
         ParserQuery parser(end, true);
         ASTPtr res;
-
-        const auto ignore_error = config().getBool("ignore-error", false);
 
         if (is_interactive || ignore_error)
         {
@@ -928,7 +1059,7 @@ private:
     void sendData(Block & sample, const ColumnsDescription & columns_description)
     {
         /// If INSERT data must be sent.
-        const ASTInsertQuery * parsed_insert_query = typeid_cast<const ASTInsertQuery *>(&*parsed_query);
+        const auto * parsed_insert_query = parsed_query->as<ASTInsertQuery>();
         if (!parsed_insert_query)
             return;
 
@@ -953,14 +1084,16 @@ private:
         String current_format = insert_format;
 
         /// Data format can be specified in the INSERT query.
-        if (ASTInsertQuery * insert = typeid_cast<ASTInsertQuery *>(&*parsed_query))
+        if (const auto * insert = parsed_query->as<ASTInsertQuery>())
+        {
             if (!insert->format.empty())
                 current_format = insert->format;
+        }
 
         BlockInputStreamPtr block_input = context.getInputFormat(
             current_format, buf, sample, insert_format_max_block_size);
 
-        const auto & column_defaults = columns_description.defaults;
+        const auto & column_defaults = columns_description.getDefaults();
         if (!column_defaults.empty())
             block_input = std::make_shared<AddingDefaultsBlockInputStream>(block_input, column_defaults, context);
 
@@ -971,13 +1104,24 @@ private:
         while (true)
         {
             Block block = async_block_input->read();
-            connection->sendData(block);
-            processed_rows += block.rows();
 
             /// Check if server send Log packet
+            receiveLogs();
+
+            /// Check if server send Exception packet
             auto packet_type = connection->checkPacket();
-            if (packet_type && *packet_type == Protocol::Server::Log)
-                receiveAndProcessPacket();
+            if (packet_type && *packet_type == Protocol::Server::Exception)
+            {
+                /*
+                 * We're exiting with error, so it makes sense to kill the
+                 * input stream without waiting for it to complete.
+                 */
+                async_block_input->cancel(true);
+                return;
+            }
+
+            connection->sendData(block);
+            processed_rows += block.rows();
 
             if (!block)
                 break;
@@ -1023,25 +1167,56 @@ private:
         InterruptListener interrupt_listener;
         bool cancelled = false;
 
+        // TODO: get the poll_interval from commandline.
+        const auto receive_timeout = connection_parameters.timeouts.receive_timeout;
+        constexpr size_t default_poll_interval = 1000000; /// in microseconds
+        constexpr size_t min_poll_interval = 5000; /// in microseconds
+        const size_t poll_interval
+            = std::max(min_poll_interval, std::min<size_t>(receive_timeout.totalMicroseconds(), default_poll_interval));
+
         while (true)
         {
-            /// Has the Ctrl+C been pressed and thus the query should be cancelled?
-            /// If this is the case, inform the server about it and receive the remaining packets
-            /// to avoid losing sync.
-            if (!cancelled)
-            {
-                if (interrupt_listener.check())
-                {
-                    connection->sendCancel();
-                    cancelled = true;
-                    if (is_interactive)
-                        std::cout << "Cancelling query." << std::endl;
+            Stopwatch receive_watch(CLOCK_MONOTONIC_COARSE);
 
-                    /// Pressing Ctrl+C twice results in shut down.
-                    interrupt_listener.unblock();
+            while (true)
+            {
+                /// Has the Ctrl+C been pressed and thus the query should be cancelled?
+                /// If this is the case, inform the server about it and receive the remaining packets
+                /// to avoid losing sync.
+                if (!cancelled)
+                {
+                    auto cancelQuery = [&] {
+                        connection->sendCancel();
+                        cancelled = true;
+                        if (is_interactive)
+                            std::cout << "Cancelling query." << std::endl;
+
+                        /// Pressing Ctrl+C twice results in shut down.
+                        interrupt_listener.unblock();
+                    };
+
+                    if (interrupt_listener.check())
+                    {
+                        cancelQuery();
+                    }
+                    else
+                    {
+                        double elapsed = receive_watch.elapsedSeconds();
+                        if (elapsed > receive_timeout.totalSeconds())
+                        {
+                            std::cout << "Timeout exceeded while receiving data from server."
+                                      << " Waited for " << static_cast<size_t>(elapsed) << " seconds,"
+                                      << " timeout is " << receive_timeout.totalSeconds() << " seconds." << std::endl;
+
+                            cancelQuery();
+                        }
+                    }
                 }
-                else if (!connection->poll(1000000))
-                    continue;    /// If there is no new data, continue checking whether the query was cancelled after a timeout.
+
+                /// Poll for changes after a cancellation check, otherwise it never reached
+                /// because of progress updates from server.
+                if (connection->poll(poll_interval))
+                  break;
             }
 
             if (!receiveAndProcessPacket())
@@ -1057,7 +1232,7 @@ private:
     /// Returns true if one should continue receiving packets.
     bool receiveAndProcessPacket()
     {
-        Connection::Packet packet = connection->receivePacket();
+        Packet packet = connection->receivePacket();
 
         switch (packet.type)
         {
@@ -1105,7 +1280,7 @@ private:
     {
         while (true)
         {
-            Connection::Packet packet = connection->receivePacket();
+            Packet packet = connection->receivePacket();
 
             switch (packet.type)
             {
@@ -1134,12 +1309,12 @@ private:
     }
 
 
-    /// Process Log packets, exit when recieve Exception or EndOfStream
+    /// Process Log packets, exit when receive Exception or EndOfStream
     bool receiveEndOfQuery()
     {
         while (true)
         {
-            Connection::Packet packet = connection->receivePacket();
+            Packet packet = connection->receivePacket();
 
             switch (packet.type)
             {
@@ -1163,6 +1338,17 @@ private:
         }
     }
 
+    /// Process Log packets, used when inserting data by blocks
+    void receiveLogs()
+    {
+        auto packet_type = connection->checkPacket();
+
+        while (packet_type && *packet_type == Protocol::Server::Log)
+        {
+            receiveAndProcessPacket();
+            packet_type = connection->checkPacket();
+        }
+    }
 
     void initBlockOutputStream(const Block & block)
     {
@@ -1184,12 +1370,14 @@ private:
             String current_format = format;
 
             /// The query can specify output format or output file.
-            if (ASTQueryWithOutput * query_with_output = dynamic_cast<ASTQueryWithOutput *>(&*parsed_query))
+            /// FIXME: try to prettify this cast using `as<>()`
+            if (const auto * query_with_output = dynamic_cast<const ASTQueryWithOutput *>(parsed_query.get()))
             {
-                if (query_with_output->out_file != nullptr)
+                if (query_with_output->out_file)
                 {
-                    const auto & out_file_node = typeid_cast<const ASTLiteral &>(*query_with_output->out_file);
+                    const auto & out_file_node = query_with_output->out_file->as<ASTLiteral &>();
                     const auto & out_file = out_file_node.value.safeGet<std::string>();
+
                     out_file_buf.emplace(out_file, DBMS_DEFAULT_BUFFER_SIZE, O_WRONLY | O_EXCL | O_CREAT);
                     out_buf = &*out_file_buf;
 
@@ -1201,7 +1389,7 @@ private:
                 {
                     if (has_vertical_output_suffix)
                         throw Exception("Output format already specified", ErrorCodes::CLIENT_OUTPUT_FORMAT_SPECIFIED);
-                    const auto & id = typeid_cast<const ASTIdentifier &>(*query_with_output->format);
+                    const auto & id = query_with_output->format->as<ASTIdentifier &>();
                     current_format = id.name;
                 }
             }
@@ -1267,6 +1455,9 @@ private:
 
         /// Received data block is immediately displayed to the user.
         block_out_stream->flush();
+
+        /// Restore progress bar after data block.
+        writeProgress();
     }
 
 
@@ -1293,7 +1484,11 @@ private:
 
     void onProgress(const Progress & value)
     {
-        progress.incrementPiecewiseAtomically(value);
+        if (!progress.incrementPiecewiseAtomically(value))
+        {
+            // Just a keep-alive update.
+            return;
+        }
         if (block_out_stream)
             block_out_stream->onProgress(value);
         writeProgress();
@@ -1302,8 +1497,8 @@ private:
 
     void clearProgress()
     {
-        std::cerr << RESTORE_CURSOR_POSITION CLEAR_TO_END_OF_LINE;
         written_progress_chars = 0;
+        std::cerr << RESTORE_CURSOR_POSITION CLEAR_TO_END_OF_LINE;
     }
 
 
@@ -1311,6 +1506,9 @@ private:
     {
         if (!need_render_progress)
             return;
+
+        /// Output all progress bar commands to stderr at once to avoid flicker.
+        WriteBufferFromFileDescriptor message(STDERR_FILENO, 1024);
 
         static size_t increment = 0;
         static const char * indicators[8] =
@@ -1326,34 +1524,35 @@ private:
         };
 
         if (written_progress_chars)
-            clearProgress();
+            message << RESTORE_CURSOR_POSITION CLEAR_TO_END_OF_LINE;
         else
-            std::cerr << SAVE_CURSOR_POSITION;
+            message << SAVE_CURSOR_POSITION;
 
-        std::stringstream message;
+        message << DISABLE_LINE_WRAPPING;
+
+        size_t prefix_size = message.count();
+
         message << indicators[increment % 8]
-            << std::fixed << std::setprecision(3)
             << " Progress: ";
 
         message
-            << formatReadableQuantity(progress.rows) << " rows, "
-            << formatReadableSizeWithDecimalSuffix(progress.bytes);
+            << formatReadableQuantity(progress.read_rows) << " rows, "
+            << formatReadableSizeWithDecimalSuffix(progress.read_bytes);
 
         size_t elapsed_ns = watch.elapsed();
         if (elapsed_ns)
             message << " ("
-                << formatReadableQuantity(progress.rows * 1000000000.0 / elapsed_ns) << " rows/s., "
-                << formatReadableSizeWithDecimalSuffix(progress.bytes * 1000000000.0 / elapsed_ns) << "/s.) ";
+                << formatReadableQuantity(progress.read_rows * 1000000000.0 / elapsed_ns) << " rows/s., "
+                << formatReadableSizeWithDecimalSuffix(progress.read_bytes * 1000000000.0 / elapsed_ns) << "/s.) ";
         else
             message << ". ";
 
-        written_progress_chars = message.str().size() - (increment % 8 == 7 ? 10 : 13);
-        std::cerr << DISABLE_LINE_WRAPPING << message.rdbuf();
+        written_progress_chars = message.count() - prefix_size - (increment % 8 == 7 ? 10 : 13);    /// Don't count invisible output (escape sequences).
 
         /// If the approximate number of rows to process is known, we can display a progress bar and percentage.
-        if (progress.total_rows > 0)
+        if (progress.total_rows_to_read > 0)
         {
-            size_t total_rows_corrected = std::max(progress.rows, progress.total_rows);
+            size_t total_rows_corrected = std::max(progress.read_rows, progress.total_rows_to_read);
 
             /// To avoid flicker, display progress bar only if .5 seconds have passed since query execution start
             ///  and the query is less than halfway done.
@@ -1361,42 +1560,44 @@ private:
             if (elapsed_ns > 500000000)
             {
                 /// Trigger to start displaying progress bar. If query is mostly done, don't display it.
-                if (progress.rows * 2 < total_rows_corrected)
+                if (progress.read_rows * 2 < total_rows_corrected)
                     show_progress_bar = true;
 
                 if (show_progress_bar)
                 {
-                    ssize_t width_of_progress_bar = static_cast<ssize_t>(terminal_size.ws_col) - written_progress_chars - strlen(" 99%");
+                    ssize_t width_of_progress_bar = static_cast<ssize_t>(terminal_width) - written_progress_chars - strlen(" 99%");
                     if (width_of_progress_bar > 0)
                     {
-                        std::string bar = UnicodeBar::render(UnicodeBar::getWidth(progress.rows, 0, total_rows_corrected, width_of_progress_bar));
-                        std::cerr << "\033[0;32m" << bar << "\033[0m";
+                        std::string bar = UnicodeBar::render(UnicodeBar::getWidth(progress.read_rows, 0, total_rows_corrected, width_of_progress_bar));
+                        message << "\033[0;32m" << bar << "\033[0m";
                         if (width_of_progress_bar > static_cast<ssize_t>(bar.size() / UNICODE_BAR_CHAR_SIZE))
-                        std::cerr << std::string(width_of_progress_bar - bar.size() / UNICODE_BAR_CHAR_SIZE, ' ');
+                            message << std::string(width_of_progress_bar - bar.size() / UNICODE_BAR_CHAR_SIZE, ' ');
                     }
                 }
             }
 
             /// Underestimate percentage a bit to avoid displaying 100%.
-            std::cerr << ' ' << (99 * progress.rows / total_rows_corrected) << '%';
+            message << ' ' << (99 * progress.read_rows / total_rows_corrected) << '%';
         }
 
-        std::cerr << ENABLE_LINE_WRAPPING;
+        message << ENABLE_LINE_WRAPPING;
         ++increment;
+
+        message.next();
     }
 
 
     void writeFinalProgress()
     {
         std::cout << "Processed "
-            << formatReadableQuantity(progress.rows) << " rows, "
-            << formatReadableSizeWithDecimalSuffix(progress.bytes);
+            << formatReadableQuantity(progress.read_rows) << " rows, "
+            << formatReadableSizeWithDecimalSuffix(progress.read_bytes);
 
         size_t elapsed_ns = watch.elapsed();
         if (elapsed_ns)
             std::cout << " ("
-                << formatReadableQuantity(progress.rows * 1000000000.0 / elapsed_ns) << " rows/s., "
-                << formatReadableSizeWithDecimalSuffix(progress.bytes * 1000000000.0 / elapsed_ns) << "/s.) ";
+                << formatReadableQuantity(progress.read_rows * 1000000000.0 / elapsed_ns) << " rows/s., "
+                << formatReadableSizeWithDecimalSuffix(progress.read_bytes * 1000000000.0 / elapsed_ns) << "/s.) ";
         else
             std::cout << ". ";
     }
@@ -1449,7 +1650,7 @@ private:
 
     void showClientVersion()
     {
-        std::cout << DBMS_NAME << " client version " << VERSION_STRING << "." << std::endl;
+        std::cout << DBMS_NAME << " client version " << VERSION_STRING << VERSION_OFFICIAL << "." << std::endl;
     }
 
 public:
@@ -1461,10 +1662,11 @@ public:
         /** We allow different groups of arguments:
           * - common arguments;
           * - arguments for any number of external tables each in form "--external args...",
-          *   where possible args are file, name, format, structure, types.
+          *   where possible args are file, name, format, structure, types;
+          * - param arguments for prepared statements.
           * Split these groups before processing.
           */
-        using Arguments = std::vector<const char *>;
+        using Arguments = std::vector<std::string>;
 
         Arguments common_arguments{""};        /// 0th argument is ignored.
         std::vector<Arguments> external_tables_arguments;
@@ -1510,40 +1712,65 @@ public:
             else
             {
                 in_external_group = false;
-                common_arguments.emplace_back(arg);
+
+                /// Parameter arg after underline.
+                if (startsWith(arg, "--param_"))
+                {
+                    const char * param_continuation = arg + strlen("--param_");
+                    const char * equal_pos = strchr(param_continuation, '=');
+
+                    if (equal_pos == param_continuation)
+                        throw Exception("Parameter name cannot be empty", ErrorCodes::BAD_ARGUMENTS);
+
+                    if (equal_pos)
+                    {
+                        /// param_name=value
+                        query_parameters.emplace(String(param_continuation, equal_pos), String(equal_pos + 1));
+                    }
+                    else
+                    {
+                        /// param_name value
+                        ++arg_num;
+                        arg = argv[arg_num];
+                        query_parameters.emplace(String(param_continuation), String(arg));
+                    }
+                }
+                else
+                    common_arguments.emplace_back(arg);
             }
         }
 
-        ioctl(0, TIOCGWINSZ, &terminal_size);
+        stdin_is_not_tty = !isatty(STDIN_FILENO);
+
+        if (!stdin_is_not_tty)
+            terminal_width = getTerminalWidth();
 
         namespace po = boost::program_options;
 
-        unsigned line_length = po::options_description::m_default_line_length;
-        unsigned min_description_length = line_length / 2;
-        if (!stdin_is_not_tty)
-        {
-            line_length = std::max(3U, static_cast<unsigned>(terminal_size.ws_col));
-            min_description_length = std::min(min_description_length, line_length - 2);
-        }
-
-#define DECLARE_SETTING(TYPE, NAME, DEFAULT, DESCRIPTION) (#NAME, po::value<std::string>(), DESCRIPTION)
-
         /// Main commandline options related to client functionality and all parameters from Settings.
-        po::options_description main_description("Main options", line_length, min_description_length);
+        po::options_description main_description = createOptionsDescription("Main options", terminal_width);
         main_description.add_options()
             ("help", "produce help message")
-            ("config-file,c", po::value<std::string>(), "config-file path")
+            ("config-file,C", po::value<std::string>(), "config-file path")
+            ("config,c", po::value<std::string>(), "config-file path (another shorthand)")
             ("host,h", po::value<std::string>()->default_value("localhost"), "server host")
             ("port", po::value<int>()->default_value(9000), "server port")
             ("secure,s", "Use TLS connection")
             ("user,u", po::value<std::string>()->default_value("default"), "user")
-            ("password", po::value<std::string>(), "password")
+            /** If "--password [value]" is used but the value is omitted, the bad argument exception will be thrown.
+              * implicit_value is used to avoid this exception (to allow user to type just "--password")
+              * Since currently boost provides no way to check if a value has been set implicitly for an option,
+              * the "\n" is used to distinguish this case because there is hardly a chance an user would use "\n"
+              * as the password.
+              */
+            ("password", po::value<std::string>()->implicit_value("\n", ""), "password")
             ("ask-password", "ask-password")
             ("query_id", po::value<std::string>(), "query_id")
             ("query,q", po::value<std::string>(), "query")
             ("database,d", po::value<std::string>(), "database")
             ("pager", po::value<std::string>(), "pager")
             ("disable_suggestion,A", "Disable loading suggestion data. Note that suggestion data is loaded asynchronously through a second connection to ClickHouse server. Also it is reasonable to disable suggestion if you want to paste a query with TAB characters. Shorthand option -A is for those who get used to mysql client.")
+            ("always_load_suggestion_data", "Load suggestion data even if clickhouse-client is run in non-interactive mode. Used for testing.")
             ("suggestion_limit", po::value<int>()->default_value(10000),
                 "Suggestion limit for how many databases, tables and columns to fetch.")
             ("multiline,m", "multiline")
@@ -1562,12 +1789,12 @@ public:
             ("compression", po::value<bool>(), "enable or disable compression")
             ("log-level", po::value<std::string>(), "client log level")
             ("server_logs_file", po::value<std::string>(), "put server logs into specified file")
-            APPLY_FOR_SETTINGS(DECLARE_SETTING)
         ;
-#undef DECLARE_SETTING
+
+        context.getSettingsRef().addProgramOptions(main_description);
 
         /// Commandline options related to external tables.
-        po::options_description external_description("External tables options");
+        po::options_description external_description = createOptionsDescription("External tables options", terminal_width);
         external_description.add_options()
             ("file", po::value<std::string>(), "data file or - for stdin")
             ("name", po::value<std::string>()->default_value("_data"), "name of the table")
@@ -1577,10 +1804,10 @@ public:
         ;
 
         /// Parse main commandline options.
-        po::parsed_options parsed = po::command_line_parser(
-            common_arguments.size(), common_arguments.data()).options(main_description).run();
+        po::parsed_options parsed = po::command_line_parser(common_arguments).options(main_description).run();
         po::variables_map options;
         po::store(parsed, options);
+        po::notify(options);
 
         if (options.count("version") || options.count("V"))
         {
@@ -1600,6 +1827,7 @@ public:
         {
             std::cout << main_description << "\n";
             std::cout << external_description << "\n";
+            std::cout << "In addition, --param_name=value can be specified for substitution of parameters for parametrized queries.\n";
             exit(0);
         }
 
@@ -1610,10 +1838,9 @@ public:
         for (size_t i = 0; i < external_tables_arguments.size(); ++i)
         {
             /// Parse commandline options related to external tables.
-            po::parsed_options parsed = po::command_line_parser(
-                external_tables_arguments[i].size(), external_tables_arguments[i].data()).options(external_description).run();
+            po::parsed_options parsed_tables = po::command_line_parser(external_tables_arguments[i]).options(external_description).run();
             po::variables_map external_options;
-            po::store(parsed, external_options);
+            po::store(parsed_tables, external_options);
 
             try
             {
@@ -1632,16 +1859,23 @@ public:
             }
         }
 
-        /// Extract settings from the options.
-#define EXTRACT_SETTING(TYPE, NAME, DEFAULT, DESCRIPTION) \
-        if (options.count(#NAME)) \
-            context.setSetting(#NAME, options[#NAME].as<std::string>());
-        APPLY_FOR_SETTINGS(EXTRACT_SETTING)
-#undef EXTRACT_SETTING
+        /// Copy settings-related program options to config.
+        /// TODO: Is this code necessary?
+        for (const auto & setting : context.getSettingsRef())
+        {
+            const String name = setting.getName().toString();
+            if (options.count(name))
+                config().setString(name, options[name].as<std::string>());
+        }
+
+        if (options.count("config-file") && options.count("config"))
+            throw Exception("Two or more configuration files referenced in arguments", ErrorCodes::BAD_ARGUMENTS);
 
         /// Save received data into the internal config.
         if (options.count("config-file"))
             config().setString("config-file", options["config-file"].as<std::string>());
+        if (options.count("config"))
+            config().setString("config-file", options["config"].as<std::string>());
         if (options.count("host") && !options["host"].defaulted())
             config().setString("host", options["host"].as<std::string>());
         if (options.count("query_id"))
@@ -1691,20 +1925,33 @@ public:
             server_logs_file = options["server_logs_file"].as<std::string>();
         if (options.count("disable_suggestion"))
             config().setBool("disable_suggestion", true);
+        if (options.count("always_load_suggestion_data"))
+        {
+            if (options.count("disable_suggestion"))
+                throw Exception("Command line parameters disable_suggestion (-A) and always_load_suggestion_data cannot be specified simultaneously",
+                    ErrorCodes::BAD_ARGUMENTS);
+            config().setBool("always_load_suggestion_data", true);
+        }
         if (options.count("suggestion_limit"))
             config().setInt("suggestion_limit", options["suggestion_limit"].as<int>());
+
+        argsToConfig(common_arguments, config(), 100);
+
     }
 };
 
 }
 
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wmissing-declarations"
+
 int mainEntryClickHouseClient(int argc, char ** argv)
 {
-    DB::Client client;
-
     try
     {
+        DB::Client client;
         client.init(argc, argv);
+        return client.run();
     }
     catch (const boost::program_options::error & e)
     {
@@ -1716,6 +1963,4 @@ int mainEntryClickHouseClient(int argc, char ** argv)
         std::cerr << DB::getCurrentExceptionMessage(true) << std::endl;
         return 1;
     }
-
-    return client.run();
 }

@@ -4,6 +4,7 @@
 #include <AggregateFunctions/FactoryHelpers.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDateTime.h>
+#include "registerAggregateFunctions.h"
 
 
 namespace DB
@@ -12,6 +13,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
+    extern const int BAD_ARGUMENTS;
 }
 
 namespace

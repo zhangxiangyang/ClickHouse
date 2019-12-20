@@ -11,7 +11,7 @@ It is appropriate to use `AggregatingMergeTree` if it reduces the number of rows
 
 ## Creating a Table
 
-``` sql
+```sql
 CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
 (
     name1 [type1] [DEFAULT|MATERIALIZED|ALIAS expr1],
@@ -21,6 +21,7 @@ CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
 [PARTITION BY expr]
 [ORDER BY expr]
 [SAMPLE BY expr]
+[TTL expr]
 [SETTINGS name=value, ...]
 ```
 
@@ -28,7 +29,7 @@ For a description of request parameters, see [request description](../../query_l
 
 **Query clauses**
 
-When creating a `ReplacingMergeTree` table the same [clauses](mergetree.md) are required, as when creating a `MergeTree` table.
+When creating a `AggregatingMergeTree` table the same [clauses](mergetree.md) are required, as when creating a `MergeTree` table.
 
 <details markdown="1"><summary>Deprecated Method for Creating a Table</summary>
 
@@ -58,7 +59,7 @@ In the results of `SELECT` query the values of `AggregateFunction` type have imp
 
 `AggregatingMergeTree` materialized view that watches the `test.visits` table:
 
-``` sql
+```sql
 CREATE MATERIALIZED VIEW test.basic
 ENGINE = AggregatingMergeTree() PARTITION BY toYYYYMM(StartDate) ORDER BY (CounterID, StartDate)
 AS SELECT
@@ -72,7 +73,7 @@ GROUP BY CounterID, StartDate;
 
 Inserting of data into the `test.visits` table.
 
-``` sql
+```sql
 INSERT INTO test.visits ...
 ```
 
@@ -80,7 +81,7 @@ The data are inserted in both the table and view `test.basic` that will perform 
 
 To get the aggregated data, we need to execute a query such as `SELECT ... GROUP BY ...` from the view `test.basic`:
 
-``` sql
+```sql
 SELECT
     StartDate,
     sumMerge(Visits) AS Visits,

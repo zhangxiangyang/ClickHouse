@@ -1,5 +1,5 @@
 #if __APPLE__ || __FreeBSD__
-int main(int argc, char ** argv) { return 0; }
+int main(int, char **) { return 0; }
 #else
 
 #include <fcntl.h>
@@ -11,7 +11,7 @@ int main(int argc, char ** argv) { return 0; }
 #include <vector>
 #include <Poco/Exception.h>
 #include <Common/Exception.h>
-#include <common/ThreadPool.h>
+#include <Common/ThreadPool.h>
 #include <Common/Stopwatch.h>
 #include <IO/BufferWithOwnMemory.h>
 #include <IO/ReadHelpers.h>
@@ -22,10 +22,7 @@ int main(int argc, char ** argv) { return 0; }
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <IO/AIO.h>
-
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
-    #include <malloc.h>
-#endif
+#include <malloc.h>
 #include <sys/syscall.h>
 
 
@@ -54,9 +51,9 @@ void thread(int fd, int mode, size_t min_offset, size_t max_offset, size_t block
 
     AIOContext ctx;
 
-    std::vector<Memory> buffers(buffers_count);
+    std::vector<Memory<>> buffers(buffers_count);
     for (size_t i = 0; i < buffers_count; ++i)
-        buffers[i] = Memory(block_size, sysconf(_SC_PAGESIZE));
+        buffers[i] = Memory<>(block_size, sysconf(_SC_PAGESIZE));
 
     drand48_data rand_data;
     timespec times;
@@ -178,7 +175,7 @@ int mainImpl(int argc, char ** argv)
     Stopwatch watch;
 
     for (size_t i = 0; i < threads_count; ++i)
-        pool.schedule(std::bind(thread, fd, mode, min_offset, max_offset, block_size, buffers_count, count));
+        pool.scheduleOrThrowOnError(std::bind(thread, fd, mode, min_offset, max_offset, block_size, buffers_count, count));
     pool.wait();
 
     watch.stop();

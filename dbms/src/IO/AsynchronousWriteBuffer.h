@@ -4,7 +4,7 @@
 
 #include <vector>
 
-#include <common/ThreadPool.h>
+#include <Common/ThreadPool.h>
 #include <IO/WriteBuffer.h>
 
 
@@ -41,7 +41,7 @@ private:
         swapBuffers();
 
         /// The data will be written in separate stream.
-        pool.schedule([this] { thread(); });
+        pool.scheduleOrThrowOnError([this] { thread(); });
     }
 
 public:

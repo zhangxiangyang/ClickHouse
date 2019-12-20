@@ -2,7 +2,7 @@
 
 #include <IO/ReadBuffer.h>
 #include <IO/BufferWithOwnMemory.h>
-#include <IO/ZlibCompressionMethod.h>
+#include <IO/CompressionMethod.h>
 
 #include <zlib.h>
 
@@ -21,8 +21,8 @@ class ZlibInflatingReadBuffer : public BufferWithOwnMemory<ReadBuffer>
 {
 public:
     ZlibInflatingReadBuffer(
-            ReadBuffer & in_,
-            ZlibCompressionMethod compression_method,
+            std::unique_ptr<ReadBuffer> in_,
+            CompressionMethod compression_method,
             size_t buf_size = DBMS_DEFAULT_BUFFER_SIZE,
             char * existing_memory = nullptr,
             size_t alignment = 0);
@@ -32,7 +32,7 @@ public:
 private:
     bool nextImpl() override;
 
-    ReadBuffer & in;
+    std::unique_ptr<ReadBuffer> in;
     z_stream zstr;
     bool eof;
 };

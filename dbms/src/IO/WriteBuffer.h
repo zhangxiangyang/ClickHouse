@@ -35,7 +35,7 @@ public:
       */
     inline void next()
     {
-        if (!offset())
+        if (!offset() && available())
             return;
         bytes += offset();
 
@@ -76,7 +76,7 @@ public:
         {
             nextIfAtEnd();
             size_t bytes_to_copy = std::min(static_cast<size_t>(working_buffer.end() - pos), n - bytes_copied);
-            std::memcpy(pos, from + bytes_copied, bytes_to_copy);
+            memcpy(pos, from + bytes_copied, bytes_to_copy);
             pos += bytes_to_copy;
             bytes_copied += bytes_to_copy;
         }
@@ -89,6 +89,9 @@ public:
         *pos = x;
         ++pos;
     }
+
+    virtual void sync() {}
+    virtual void finalize() {}
 
 private:
     /** Write the data in the buffer (from the beginning of the buffer to the current position).

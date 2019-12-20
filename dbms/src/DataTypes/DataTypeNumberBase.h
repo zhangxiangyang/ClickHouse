@@ -7,6 +7,9 @@
 namespace DB
 {
 
+template <typename T>
+class ColumnVector;
+
 /** Implements part of the IDataType interface, common to all numbers and for Date and DateTime.
   */
 template <typename T>
@@ -17,6 +20,8 @@ class DataTypeNumberBase : public DataTypeWithSimpleSerialization
 public:
     static constexpr bool is_parametric = false;
     using FieldType = T;
+
+    using ColumnType = ColumnVector<T>;
 
     const char * getFamilyName() const override { return TypeName<T>::get(); }
     TypeIndex getTypeId() const override { return TypeId<T>::value; }
@@ -29,13 +34,15 @@ public:
     Field getDefault() const override;
 
     /** Format is platform-dependent. */
-
     void serializeBinary(const Field & field, WriteBuffer & ostr) const override;
     void deserializeBinary(Field & field, ReadBuffer & istr) const override;
     void serializeBinary(const IColumn & column, size_t row_num, WriteBuffer & ostr) const override;
     void deserializeBinary(IColumn & column, ReadBuffer & istr) const override;
     void serializeBinaryBulk(const IColumn & column, WriteBuffer & ostr, size_t offset, size_t limit) const override;
     void deserializeBinaryBulk(IColumn & column, ReadBuffer & istr, size_t limit, double avg_value_size_hint) const override;
+
+    void serializeProtobuf(const IColumn & column, size_t row_num, ProtobufWriter & protobuf, size_t & value_index) const override;
+    void deserializeProtobuf(IColumn & column, ProtobufReader & protobuf, bool allow_add_row, bool & row_added) const override;
 
     MutableColumnPtr createColumn() const override;
 

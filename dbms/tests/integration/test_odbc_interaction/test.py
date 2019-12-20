@@ -18,6 +18,7 @@ create_table_sql_template =   """
     `name` varchar(50) NOT NULL,
     `age` int  NOT NULL default 0,
     `money` int NOT NULL default 0,
+    `column_x` int default NULL,
     PRIMARY KEY (`id`)) ENGINE=InnoDB;
     """
 def get_mysql_conn():
@@ -86,16 +87,26 @@ def test_mysql_simple_select_works(started_cluster):
     conn = get_mysql_conn()
     create_mysql_table(conn, table_name)
 
+    # Check that NULL-values are handled correctly by the ODBC-bridge
+    with conn.cursor() as cursor:
+        cursor.execute("INSERT INTO clickhouse.{} VALUES(50, 'null-guy', 127, 255, NULL), (100, 'non-null-guy', 127, 255, 511);".format(table_name))
+        conn.commit()
+    assert node1.query("SELECT column_x FROM odbc('DSN={}', '{}') SETTINGS external_table_functions_use_nulls=1".format(mysql_setup["DSN"], table_name)) == '\\N\n511\n'
+    assert node1.query("SELECT column_x FROM odbc('DSN={}', '{}') SETTINGS external_table_functions_use_nulls=0".format(mysql_setup["DSN"], table_name)) == '0\n511\n'
+
     node1.query('''
-CREATE TABLE {}(id UInt32, name String, age UInt32, money UInt32) ENGINE = MySQL('mysql1:3306', 'clickhouse', '{}', 'root', 'clickhouse');
+CREATE TABLE {}(id UInt32, name String, age UInt32, money UInt32, column_x Nullable(UInt32)) ENGINE = MySQL('mysql1:3306', 'clickhouse', '{}', 'root', 'clickhouse');
 '''.format(table_name, table_name))
 
-    node1.query("INSERT INTO {}(id, name, money) select number, concat('name_', toString(number)), 3 from numbers(100) ".format(table_name))
+    node1.query("INSERT INTO {}(id, name, money, column_x) select number, concat('name_', toString(number)), 3, NULL from numbers(49) ".format(table_name))
+    node1.query("INSERT INTO {}(id, name, money, column_x) select number, concat('name_', toString(number)), 3, 42 from numbers(51, 49) ".format(table_name))
 
-    # actually, I don't know, what wrong with that connection string, but libmyodbc always falls into segfault
-    node1.query("SELECT * FROM odbc('DSN={}', '{}')".format(mysql_setup["DSN"], table_name), ignore_error=True)
+    assert node1.query("SELECT COUNT () FROM {} WHERE column_x IS NOT NULL".format(table_name)) == '50\n'
+    assert node1.query("SELECT COUNT () FROM {} WHERE column_x IS NULL".format(table_name)) == '50\n'
+    assert node1.query("SELECT count(*) FROM odbc('DSN={}', '{}')".format(mysql_setup["DSN"], table_name)) == '100\n'
 
-    # server still works after segfault
+    # previously this test fails with segfault
+    # just to be sure :)
     assert node1.query("select 1") == "1\n"
 
     conn.close()
@@ -177,20 +188,23 @@ def test_postgres_odbc_hached_dictionary_with_schema(started_cluster):
     assert node1.query("select dictGetString('postgres_odbc_hashed', 'column2', toUInt64(1))") == "hello\n"
     assert node1.query("select dictGetString('postgres_odbc_hashed', 'column2', toUInt64(2))") == "world\n"
 
+def test_postgres_odbc_hached_dictionary_no_tty_pipe_overflow(started_cluster):
+    conn = get_postgres_conn()
+    cursor = conn.cursor()
+    cursor.execute("insert into clickhouse.test_table values(3, 'xxx')")
+    for i in xrange(100):
+        try:
+            node1.query("system reload dictionary postgres_odbc_hashed", timeout=5)
+        except Exception as ex:
+            assert False, "Exception occured -- odbc-bridge hangs: " + str(ex)
+
+    assert node1.query("select dictGetString('postgres_odbc_hashed', 'column2', toUInt64(3))") == "xxx\n"
+
 def test_bridge_dies_with_parent(started_cluster):
     node1.query("select dictGetString('postgres_odbc_hashed', 'column2', toUInt64(1))")
-    def get_pid(cmd):
-        output = node1.exec_in_container(["bash", "-c", "ps ax | grep '{}' | grep -v 'grep' | grep -v 'bash -c' | awk '{{print $1}}'".format(cmd)], privileged=True, user='root')
-        if output:
-            try:
-                pid = int(output.split('\n')[0].strip())
-                return pid
-            except:
-                return None
-            return None
 
-    clickhouse_pid = get_pid("clickhouse server")
-    bridge_pid = get_pid("odbc-bridge")
+    clickhouse_pid = node1.get_process_pid("clickhouse server")
+    bridge_pid = node1.get_process_pid("odbc-bridge")
     assert clickhouse_pid is not None
     assert bridge_pid is not None
 
@@ -199,11 +213,11 @@ def test_bridge_dies_with_parent(started_cluster):
             node1.exec_in_container(["bash", "-c", "kill {}".format(clickhouse_pid)], privileged=True, user='root')
         except:
             pass
-        clickhouse_pid = get_pid("clickhouse server")
+        clickhouse_pid = node1.get_process_pid("clickhouse server")
         time.sleep(1)
 
     time.sleep(1) # just for sure, that odbc-bridge caught signal
-    bridge_pid = get_pid("odbc-bridge")
+    bridge_pid = node1.get_process_pid("odbc-bridge")
 
     assert clickhouse_pid is None
     assert bridge_pid is None

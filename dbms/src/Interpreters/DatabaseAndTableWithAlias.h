@@ -1,19 +1,21 @@
 #pragma once
 
+#include <Core/Names.h>
+#include <Core/Types.h>
+#include <Core/NamesAndTypes.h>
+#include <Parsers/IAST_fwd.h>
+
 #include <memory>
 #include <optional>
-#include <Core/Types.h>
-#include <Parsers/ASTSelectQuery.h>
+
 
 namespace DB
 {
 
-class IAST;
-using ASTPtr = std::shared_ptr<IAST>;
-
 class ASTSelectQuery;
 class ASTIdentifier;
 struct ASTTableExpression;
+class Context;
 
 
 /// Extracts database name (and/or alias) from table expression or identifier
@@ -23,25 +25,37 @@ struct DatabaseAndTableWithAlias
     String table;
     String alias;
 
+    DatabaseAndTableWithAlias() = default;
+    DatabaseAndTableWithAlias(const ASTPtr & identifier_node, const String & current_database = "");
     DatabaseAndTableWithAlias(const ASTIdentifier & identifier, const String & current_database = "");
-    DatabaseAndTableWithAlias(const ASTTableExpression & table_expression, const String & current_database);
+    DatabaseAndTableWithAlias(const ASTTableExpression & table_expression, const String & current_database = "");
 
-    /// "alias." or "database.table." if alias is empty
-    String getQualifiedNamePrefix() const;
+    /// "alias." or "table." if alias is empty
+    String getQualifiedNamePrefix(bool with_dot = true) const;
 
-    /// If ast is ASTIdentifier, prepend getQualifiedNamePrefix() to it's name.
-    void makeQualifiedName(const ASTPtr & ast) const;
+    /// Check if it satisfies another db_table name. @note opterion is not symmetric.
+    bool satisfies(const DatabaseAndTableWithAlias & table, bool table_may_be_an_alias);
 };
 
-void stripIdentifier(DB::ASTPtr & ast, size_t num_qualifiers_to_strip);
+struct TableWithColumnNames
+{
+    DatabaseAndTableWithAlias table;
+    Names columns;
+    Names hidden_columns;
 
-size_t getNumComponentsToStripInOrderToTranslateQualifiedName(const ASTIdentifier & identifier,
-                                                              const DatabaseAndTableWithAlias & names);
+    TableWithColumnNames(const DatabaseAndTableWithAlias & table_, const Names & columns_)
+        : table(table_)
+        , columns(columns_)
+    {}
+
+    void addHiddenColumns(const NamesAndTypesList & addition)
+    {
+        for (auto & column : addition)
+            hidden_columns.push_back(column.name);
+    }
+};
 
 std::vector<DatabaseAndTableWithAlias> getDatabaseAndTables(const ASTSelectQuery & select_query, const String & current_database);
 std::optional<DatabaseAndTableWithAlias> getDatabaseAndTable(const ASTSelectQuery & select, size_t table_number);
-
-std::vector<const ASTTableExpression *> getSelectTablesExpression(const ASTSelectQuery & select_query);
-ASTPtr getTableFunctionOrSubquery(const ASTSelectQuery & select, size_t table_number);
 
 }

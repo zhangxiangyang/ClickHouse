@@ -2,20 +2,29 @@
 
 #include <future>
 #include <thread>
+#include <ext/scope_guard.h>
 #include <DataStreams/IBlockOutputStream.h>
 #include <DataStreams/OwningBlockInputStream.h>
 #include <Interpreters/Context.h>
+#include <IO/WriteHelpers.h>
 #include <Common/ShellCommand.h>
+#include <Common/ThreadPool.h>
 #include <common/logger_useful.h>
+#include <common/LocalDateTime.h>
 #include "DictionarySourceFactory.h"
 #include "DictionarySourceHelpers.h"
 #include "DictionaryStructure.h"
+#include "registerDictionaries.h"
 
 
 namespace DB
 {
-static const size_t max_block_size = 8192;
+static const UInt64 max_block_size = 8192;
 
+namespace ErrorCodes
+{
+    extern const int DICTIONARY_ACCESS_DENIED;
+}
 
 namespace
 {
@@ -23,8 +32,8 @@ namespace
     class ShellCommandOwningBlockInputStream : public OwningBlockInputStream<ShellCommand>
     {
     public:
-        ShellCommandOwningBlockInputStream(const BlockInputStreamPtr & stream, std::unique_ptr<ShellCommand> own)
-            : OwningBlockInputStream(std::move(stream), std::move(own))
+        ShellCommandOwningBlockInputStream(const BlockInputStreamPtr & impl, std::unique_ptr<ShellCommand> own_)
+            : OwningBlockInputStream(std::move(impl), std::move(own_))
         {
         }
 
@@ -42,16 +51,15 @@ ExecutableDictionarySource::ExecutableDictionarySource(
     const DictionaryStructure & dict_struct_,
     const Poco::Util::AbstractConfiguration & config,
     const std::string & config_prefix,
-    Block & sample_block,
-    const Context & context)
+    Block & sample_block_,
+    const Context & context_)
     : log(&Logger::get("ExecutableDictionarySource"))
-    , update_time{std::chrono::system_clock::from_time_t(0)}
     , dict_struct{dict_struct_}
     , command{config.getString(config_prefix + ".command")}
     , update_field{config.getString(config_prefix + ".update_field", "")}
     , format{config.getString(config_prefix + ".format")}
-    , sample_block{sample_block}
-    , context(context)
+    , sample_block{sample_block_}
+    , context(context_)
 {
 }
 
@@ -67,31 +75,6 @@ ExecutableDictionarySource::ExecutableDictionarySource(const ExecutableDictionar
 {
 }
 
-std::string ExecutableDictionarySource::getUpdateFieldAndDate()
-{
-    if (update_time != std::chrono::system_clock::from_time_t(0))
-    {
-        auto tmp_time = update_time;
-        update_time = std::chrono::system_clock::now();
-        time_t hr_time = std::chrono::system_clock::to_time_t(tmp_time) - 1;
-        char buffer[80];
-        struct tm * timeinfo;
-        timeinfo = localtime(&hr_time);
-        strftime(buffer, 80, "\"%Y-%m-%d %H:%M:%S\"", timeinfo);
-        std::string str_time(buffer);
-        return command + " " + update_field + " " + str_time;
-        ///Example case: command -T "2018-02-12 12:44:04"
-        ///should return all entries after mentioned date
-        ///if executable is eligible to return entries according to date.
-        ///Where "-T" is passed as update_field.
-    }
-    else
-    {
-        std::string str_time("\"0000-00-00 00:00:00\""); ///for initial load
-        return command + " " + update_field + " " + str_time;
-    }
-}
-
 BlockInputStreamPtr ExecutableDictionarySource::loadAll()
 {
     LOG_TRACE(log, "loadAll " + toString());
@@ -102,9 +85,15 @@ BlockInputStreamPtr ExecutableDictionarySource::loadAll()
 
 BlockInputStreamPtr ExecutableDictionarySource::loadUpdatedAll()
 {
-    std::string command_update = getUpdateFieldAndDate();
-    LOG_TRACE(log, "loadUpdatedAll " + command_update);
-    auto process = ShellCommand::execute(command_update);
+    time_t new_update_time = time(nullptr);
+    SCOPE_EXIT(update_time = new_update_time);
+
+    std::string command_with_update_field = command;
+    if (update_time)
+        command_with_update_field += " " + update_field + " " + DB::toString(LocalDateTime(update_time - 1));
+
+    LOG_TRACE(log, "loadUpdatedAll " + command_with_update_field);
+    auto process = ShellCommand::execute(command_with_update_field);
     auto input_stream = context.getInputFormat(format, process->out, sample_block, max_block_size);
     return std::make_shared<ShellCommandOwningBlockInputStream>(input_stream, std::move(process));
 }
@@ -114,7 +103,7 @@ namespace
     /** A stream, that also runs and waits for background thread
   * (that will feed data into pipe to be read from the other side of the pipe).
   */
-    class BlockInputStreamWithBackgroundThread final : public IProfilingBlockInputStream
+    class BlockInputStreamWithBackgroundThread final : public IBlockInputStream
     {
     public:
         BlockInputStreamWithBackgroundThread(
@@ -149,7 +138,7 @@ namespace
 
         void readSuffix() override
         {
-            IProfilingBlockInputStream::readSuffix();
+            IBlockInputStream::readSuffix();
             if (!wait_called)
             {
                 wait_called = true;
@@ -165,7 +154,7 @@ namespace
         BlockInputStreamPtr stream;
         std::unique_ptr<ShellCommand> command;
         std::packaged_task<void()> task;
-        std::thread thread;
+        ThreadFromGlobalPool thread;
         bool wait_called = false;
     };
 
@@ -233,11 +222,21 @@ void registerDictionarySourceExecutable(DictionarySourceFactory & factory)
                                  const Poco::Util::AbstractConfiguration & config,
                                  const std::string & config_prefix,
                                  Block & sample_block,
-                                 const Context & context) -> DictionarySourcePtr {
+                                 const Context & context,
+                                 bool check_config) -> DictionarySourcePtr
+    {
         if (dict_struct.has_expressions)
             throw Exception{"Dictionary source of type `executable` does not support attribute expressions", ErrorCodes::LOGICAL_ERROR};
 
-        return std::make_unique<ExecutableDictionarySource>(dict_struct, config, config_prefix + ".executable", sample_block, context);
+        /// Executable dictionaries may execute arbitrary commands.
+        /// It's OK for dictionaries created by administrator from xml-file, but
+        /// maybe dangerous for dictionaries created from DDL-queries.
+        if (check_config)
+            throw Exception("Dictionaries with Executable dictionary source is not allowed", ErrorCodes::DICTIONARY_ACCESS_DENIED);
+
+        return std::make_unique<ExecutableDictionarySource>(
+            dict_struct, config, config_prefix + ".executable",
+            sample_block, context);
     };
     factory.registerSource("executable", createTableSource);
 }

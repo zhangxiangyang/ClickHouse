@@ -1,4 +1,4 @@
-#include <Functions/IFunction.h>
+#include <Functions/IFunctionImpl.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <DataTypes/DataTypeTuple.h>
@@ -73,23 +73,24 @@ public:
         return std::make_shared<DataTypeUInt8>();
     }
 
-    bool useDefaultImplementationForNulls() const override
-    {
-        return false;
-    }
+    bool useDefaultImplementationForConstants() const override { return true; }
 
     void executeImpl(Block & block, const ColumnNumbers & arguments, size_t result, size_t /*input_rows_count*/) override
     {
+        /// NOTE: after updating this code, check that FunctionIgnoreExceptNull returns the same type of column.
+
         /// Second argument must be ColumnSet.
         ColumnPtr column_set_ptr = block.getByPosition(arguments[1]).column;
-        const ColumnSet * column_set = typeid_cast<const ColumnSet *>(&*column_set_ptr);
+        const ColumnSet * column_set = checkAndGetColumnConstData<const ColumnSet>(column_set_ptr.get());
+        if (!column_set)
+            column_set = checkAndGetColumn<const ColumnSet>(column_set_ptr.get());
         if (!column_set)
             throw Exception("Second argument for function '" + getName() + "' must be Set; found " + column_set_ptr->getName(),
                 ErrorCodes::ILLEGAL_COLUMN);
 
         Block block_of_key_columns;
 
-        /// First argument may be tuple or single column.
+        /// First argument may be a tuple or a single column.
         const ColumnWithTypeAndName & left_arg = block.getByPosition(arguments[0]);
         const ColumnTuple * tuple = typeid_cast<const ColumnTuple *>(left_arg.column.get());
         const ColumnConst * const_tuple = checkAndGetColumnConst<ColumnTuple>(left_arg.column.get());
@@ -106,7 +107,7 @@ public:
         auto set_types = set->getDataTypes();
         if (tuple && (set_types.size() != 1 || !set_types[0]->equals(*type_tuple)))
         {
-            const Columns & tuple_columns = tuple->getColumns();
+            const auto & tuple_columns = tuple->getColumns();
             const DataTypes & tuple_types = type_tuple->getElements();
             size_t tuple_size = tuple_columns.size();
             for (size_t i = 0; i < tuple_size; ++i)

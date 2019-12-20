@@ -1,16 +1,24 @@
 #pragma once
 
-#include <Functions/FunctionUnaryArithmetic.h>
 #include <Functions/FunctionHelpers.h>
 #include <IO/WriteHelpers.h>
-
-#include <common/intExp.h>
+#include <DataTypes/getLeastSupertype.h>
+#include <DataTypes/DataTypeArray.h>
+#include <DataTypes/DataTypesNumber.h>
+#include <DataTypes/DataTypesDecimal.h>
+#include <DataTypes/DataTypeDateTime64.h>
+#include <Columns/ColumnVector.h>
+#include <Interpreters/castColumn.h>
+#include "IFunctionImpl.h"
+#include <Common/intExp.h>
+#include <Common/assert_cast.h>
 #include <cmath>
 #include <type_traits>
 #include <array>
 #include <ext/bit_cast.h>
+#include <algorithm>
 
-#if __SSE4_1__
+#ifdef __SSE4_1__
     #include <smmintrin.h>
 #endif
 
@@ -24,11 +32,13 @@ namespace ErrorCodes
     extern const int ILLEGAL_TYPE_OF_ARGUMENT;
     extern const int ILLEGAL_COLUMN;
     extern const int LOGICAL_ERROR;
+    extern const int BAD_ARGUMENTS;
 }
 
 
 /** Rounding Functions:
     * round(x, N) - rounding to nearest (N = 0 by default). Use banker's rounding for floating point numbers.
+    * roundBankers(x, N) - rounding to nearest (N = 0 by default). Use banker's rounding for all numbers.
     * floor(x, N) is the largest number <= x (N = 0 by default).
     * ceil(x, N) is the smallest number >= x (N = 0 by default).
     * trunc(x, N) - is the largest by absolute value number that is not greater than x by absolute value (N = 0 by default).
@@ -55,7 +65,7 @@ enum class ScaleMode
 
 enum class RoundingMode
 {
-#if __SSE4_1__
+#ifdef __SSE4_1__
     Round   = _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
     Floor   = _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC,
     Ceil    = _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC,
@@ -68,10 +78,16 @@ enum class RoundingMode
 #endif
 };
 
+enum class TieBreakingMode
+{
+    Auto, // use banker's rounding for floating point numbers, round up otherwise
+    Bankers, // use banker's rounding
+};
+
 
 /** Rounding functions for integer values.
   */
-template <typename T, RoundingMode rounding_mode, ScaleMode scale_mode>
+template <typename T, RoundingMode rounding_mode, ScaleMode scale_mode, TieBreakingMode tie_breaking_mode>
 struct IntegerRoundingComputation
 {
     static const size_t data_count = 1;
@@ -103,17 +119,30 @@ struct IntegerRoundingComputation
             }
             case RoundingMode::Round:
             {
-                bool negative = x < 0;
-                if (negative)
-                    x = -x;
-                x = (x + scale / 2) / scale * scale;
-                if (negative)
-                    x = -x;
+                if (x < 0)
+                    x -= scale;
+                switch (tie_breaking_mode)
+                {
+                    case TieBreakingMode::Auto:
+                        x = (x + scale / 2) / scale * scale;
+                        break;
+                    case TieBreakingMode::Bankers:
+                    {
+                        T quotient = (x + scale / 2) / scale;
+                        if (quotient * scale == x + scale / 2)
+                            // round half to even
+                            x = ((quotient + (x < 0)) & ~1) * scale;
+                        else
+                            // round the others as usual
+                            x = quotient * scale;
+                        break;
+                    }
+                }
                 return x;
             }
-            default:
-                __builtin_unreachable();
         }
+
+        __builtin_unreachable();
     }
 
     static ALWAYS_INLINE T compute(T x, T scale)
@@ -126,20 +155,23 @@ struct IntegerRoundingComputation
                 return x;
             case ScaleMode::Negative:
                 return computeImpl(x, scale);
-            default:
-                __builtin_unreachable();
         }
+
+        __builtin_unreachable();
     }
 
     static ALWAYS_INLINE void compute(const T * __restrict in, size_t scale, T * __restrict out)
     {
-        *out = compute(*in, scale);
+        if (sizeof(T) <= sizeof(scale) && scale > size_t(std::numeric_limits<T>::max()))
+            *out = 0;
+        else
+            *out = compute(*in, scale);
     }
 
 };
 
 
-#if __SSE4_1__
+#ifdef __SSE4_1__
 
 template <typename T>
 class BaseFloatRoundingComputation;
@@ -198,9 +230,9 @@ inline float roundWithMode(float x, RoundingMode mode)
         case RoundingMode::Floor: return floorf(x);
         case RoundingMode::Ceil: return ceilf(x);
         case RoundingMode::Trunc: return truncf(x);
-        default:
-            throw Exception("Logical error: unexpected 'mode' parameter passed to function roundWithMode", ErrorCodes::LOGICAL_ERROR);
     }
+
+    __builtin_unreachable();
 }
 
 inline double roundWithMode(double x, RoundingMode mode)
@@ -211,9 +243,9 @@ inline double roundWithMode(double x, RoundingMode mode)
         case RoundingMode::Floor: return floor(x);
         case RoundingMode::Ceil: return ceil(x);
         case RoundingMode::Trunc: return trunc(x);
-        default:
-            throw Exception("Logical error: unexpected 'mode' parameter passed to function roundWithMode", ErrorCodes::LOGICAL_ERROR);
     }
+
+    __builtin_unreachable();
 }
 
 template <typename T>
@@ -312,20 +344,20 @@ public:
     }
 };
 
-template <typename T, RoundingMode rounding_mode, ScaleMode scale_mode>
+template <typename T, RoundingMode rounding_mode, ScaleMode scale_mode, TieBreakingMode tie_breaking_mode>
 struct IntegerRoundingImpl
 {
 private:
-    using Op = IntegerRoundingComputation<T, rounding_mode, scale_mode>;
+    using Op = IntegerRoundingComputation<T, rounding_mode, scale_mode, tie_breaking_mode>;
 
 public:
     template <size_t scale>
     static NO_INLINE void applyImpl(const PaddedPODArray<T> & in, typename ColumnVector<T>::Container & out)
     {
-        const T* end_in = in.data() + in.size();
+        const T * end_in = in.data() + in.size();
 
-        const T* __restrict p_in = in.data();
-        T* __restrict p_out = out.data();
+        const T * __restrict p_in = in.data();
+        T * __restrict p_out = out.data();
 
         while (p_in < end_in)
         {
@@ -368,11 +400,12 @@ public:
 };
 
 
-template <typename T, RoundingMode rounding_mode>
-class DecimalRounding
+template <typename T, RoundingMode rounding_mode, TieBreakingMode tie_breaking_mode>
+class DecimalRoundingImpl
 {
+private:
     using NativeType = typename T::NativeType;
-    using Op = IntegerRoundingComputation<NativeType, rounding_mode, ScaleMode::Negative>;
+    using Op = IntegerRoundingComputation<NativeType, rounding_mode, ScaleMode::Negative, tie_breaking_mode>;
     using Container = typename ColumnDecimal<T>::Container;
 
 public:
@@ -402,13 +435,13 @@ public:
 
 /** Select the appropriate processing algorithm depending on the scale.
   */
-template <typename T, RoundingMode rounding_mode>
+template <typename T, RoundingMode rounding_mode, TieBreakingMode tie_breaking_mode>
 class Dispatcher
 {
     template <ScaleMode scale_mode>
     using FunctionRoundingImpl = std::conditional_t<std::is_floating_point_v<T>,
         FloatRoundingImpl<T, rounding_mode, scale_mode>,
-        IntegerRoundingImpl<T, rounding_mode, scale_mode>>;
+        IntegerRoundingImpl<T, rounding_mode, scale_mode, tie_breaking_mode>>;
 
     static void apply(Block & block, const ColumnVector<T> * col, Int64 scale_arg, size_t result)
     {
@@ -447,7 +480,7 @@ class Dispatcher
         auto & vec_res = col_res->getData();
 
         if (!vec_res.empty())
-            DecimalRounding<T, rounding_mode>::apply(col->getData(), vec_res, scale_arg);
+            DecimalRoundingImpl<T, rounding_mode, tie_breaking_mode>::apply(col->getData(), vec_res, scale_arg);
 
         block.getByPosition(result).column = std::move(col_res);
     }
@@ -465,7 +498,7 @@ public:
 /** A template for functions that round the value of an input parameter of type
   * (U)Int8/16/32/64, Float32/64 or Decimal32/64/128, and accept an additional optional parameter (default is 0).
   */
-template <typename Name, RoundingMode rounding_mode>
+template <typename Name, RoundingMode rounding_mode, TieBreakingMode tie_breaking_mode>
 class FunctionRounding : public IFunction
 {
 public:
@@ -490,7 +523,7 @@ public:
                 ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH);
 
         for (const auto & type : arguments)
-            if (!isNumber(type) && !isDecimal(type))
+            if (!isNumber(type))
                 throw Exception("Illegal type " + arguments[0]->getName() + " of argument of function " + getName(),
                     ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
 
@@ -502,10 +535,10 @@ public:
         if (arguments.size() == 2)
         {
             const IColumn & scale_column = *block.getByPosition(arguments[1]).column;
-            if (!scale_column.isColumnConst())
+            if (!isColumnConst(scale_column))
                 throw Exception("Scale argument for rounding functions must be constant.", ErrorCodes::ILLEGAL_COLUMN);
 
-            Field scale_field = static_cast<const ColumnConst &>(scale_column).getField();
+            Field scale_field = assert_cast<const ColumnConst &>(scale_column).getField();
             if (scale_field.getType() != Field::Types::UInt64
                 && scale_field.getType() != Field::Types::Int64)
                 throw Exception("Scale argument for rounding functions must have integer type.", ErrorCodes::ILLEGAL_COLUMN);
@@ -531,7 +564,7 @@ public:
             if constexpr (IsDataTypeNumber<DataType> || IsDataTypeDecimal<DataType>)
             {
                 using FieldType = typename DataType::FieldType;
-                Dispatcher<FieldType, rounding_mode>::apply(block, column.column.get(), scale_arg, result);
+                Dispatcher<FieldType, rounding_mode, tie_breaking_mode>::apply(block, column.column.get(), scale_arg, result);
                 return true;
             }
             return false;
@@ -556,14 +589,164 @@ public:
 };
 
 
+/** Rounds down to a number within explicitly specified array.
+  * If the value is less than the minimal bound - returns the minimal bound.
+  */
+class FunctionRoundDown : public IFunction
+{
+public:
+    static constexpr auto name = "roundDown";
+    static FunctionPtr create(const Context & context) { return std::make_shared<FunctionRoundDown>(context); }
+    FunctionRoundDown(const Context & context_) : context(context_) {}
+
+public:
+    String getName() const override { return name; }
+
+    bool isVariadic() const override { return false; }
+    size_t getNumberOfArguments() const override { return 2; }
+    bool useDefaultImplementationForConstants() const override { return true; }
+    ColumnNumbers getArgumentsThatAreAlwaysConstant() const override { return {1}; }
+
+    DataTypePtr getReturnTypeImpl(const DataTypes & arguments) const override
+    {
+        const DataTypePtr & type_x = arguments[0];
+
+        if (!isNumber(type_x))
+            throw Exception{"Unsupported type " + type_x->getName()
+                            + " of first argument of function " + getName()
+                            + ", must be numeric type.", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT};
+
+        const DataTypeArray * type_arr = checkAndGetDataType<DataTypeArray>(arguments[1].get());
+
+        if (!type_arr)
+            throw Exception{"Second argument of function " + getName()
+                            + ", must be array of boundaries to round to.", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT};
+
+        const auto type_arr_nested = type_arr->getNestedType();
+
+        if (!isNumber(type_arr_nested))
+        {
+            throw Exception{"Elements of array of second argument of function " + getName()
+                            + " must be numeric type.", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT};
+        }
+        return getLeastSupertype({type_x, type_arr_nested});
+    }
+
+    void executeImpl(Block & block, const ColumnNumbers & arguments, size_t result, size_t) override
+    {
+        auto in_column = block.getByPosition(arguments[0]).column;
+        const auto & in_type = block.getByPosition(arguments[0]).type;
+
+        auto array_column = block.getByPosition(arguments[1]).column;
+        const auto & array_type = block.getByPosition(arguments[1]).type;
+
+        const auto & return_type = block.getByPosition(result).type;
+        auto column_result = return_type->createColumn();
+        auto out = column_result.get();
+
+        if (!in_type->equals(*return_type))
+            in_column = castColumn(block.getByPosition(arguments[0]), return_type, context);
+
+        if (!array_type->equals(*return_type))
+            array_column = castColumn(block.getByPosition(arguments[1]), std::make_shared<DataTypeArray>(return_type), context);
+
+        const auto in = in_column.get();
+        auto boundaries = typeid_cast<const ColumnConst &>(*array_column).getValue<Array>();
+        size_t num_boundaries = boundaries.size();
+        if (!num_boundaries)
+            throw Exception("Empty array is illegal for boundaries in " + getName() + " function", ErrorCodes::BAD_ARGUMENTS);
+
+        if (!executeNum<UInt8>(in, out, boundaries)
+            && !executeNum<UInt16>(in, out, boundaries)
+            && !executeNum<UInt32>(in, out, boundaries)
+            && !executeNum<UInt64>(in, out, boundaries)
+            && !executeNum<Int8>(in, out, boundaries)
+            && !executeNum<Int16>(in, out, boundaries)
+            && !executeNum<Int32>(in, out, boundaries)
+            && !executeNum<Int64>(in, out, boundaries)
+            && !executeNum<Float32>(in, out, boundaries)
+            && !executeNum<Float64>(in, out, boundaries)
+            && !executeDecimal<Decimal32>(in, out, boundaries)
+            && !executeDecimal<Decimal64>(in, out, boundaries)
+            && !executeDecimal<Decimal128>(in, out, boundaries))
+        {
+            throw Exception{"Illegal column " + in->getName() + " of first argument of function " + getName(), ErrorCodes::ILLEGAL_COLUMN};
+        }
+
+        block.getByPosition(result).column = std::move(column_result);
+    }
+
+private:
+    template <typename T>
+    bool executeNum(const IColumn * in_untyped, IColumn * out_untyped, const Array & boundaries)
+    {
+        const auto in = checkAndGetColumn<ColumnVector<T>>(in_untyped);
+        auto out = typeid_cast<ColumnVector<T> *>(out_untyped);
+        if (!in || !out)
+            return false;
+
+        executeImplNumToNum(in->getData(), out->getData(), boundaries);
+        return true;
+    }
+
+    template <typename T>
+    bool executeDecimal(const IColumn * in_untyped, IColumn * out_untyped, const Array & boundaries)
+    {
+        const auto in = checkAndGetColumn<ColumnDecimal<T>>(in_untyped);
+        auto out = typeid_cast<ColumnDecimal<T> *>(out_untyped);
+        if (!in || !out)
+            return false;
+
+        executeImplNumToNum(in->getData(), out->getData(), boundaries);
+        return true;
+    }
+
+    template <typename Container>
+    void executeImplNumToNum(const Container & src, Container & dst, const Array & boundaries)
+    {
+        using ValueType = typename Container::value_type;
+        std::vector<ValueType> boundary_values(boundaries.size());
+        for (size_t i = 0; i < boundaries.size(); ++i)
+            boundary_values[i] = boundaries[i].get<ValueType>();
+
+        std::sort(boundary_values.begin(), boundary_values.end());
+        boundary_values.erase(std::unique(boundary_values.begin(), boundary_values.end()), boundary_values.end());
+
+        size_t size = src.size();
+        dst.resize(size);
+        for (size_t i = 0; i < size; ++i)
+        {
+            auto it = std::upper_bound(boundary_values.begin(), boundary_values.end(), src[i]);
+            if (it == boundary_values.end())
+            {
+                dst[i] = boundary_values.back();
+            }
+            else if (it == boundary_values.begin())
+            {
+                dst[i] = boundary_values.front();
+            }
+            else
+            {
+                dst[i] = *(it - 1);
+            }
+        }
+    }
+
+private:
+    const Context & context;
+};
+
+
 struct NameRound { static constexpr auto name = "round"; };
+struct NameRoundBankers { static constexpr auto name = "roundBankers"; };
 struct NameCeil { static constexpr auto name = "ceil"; };
 struct NameFloor { static constexpr auto name = "floor"; };
 struct NameTrunc { static constexpr auto name = "trunc"; };
 
-using FunctionRound = FunctionRounding<NameRound, RoundingMode::Round>;
-using FunctionFloor = FunctionRounding<NameFloor, RoundingMode::Floor>;
-using FunctionCeil = FunctionRounding<NameCeil, RoundingMode::Ceil>;
-using FunctionTrunc = FunctionRounding<NameTrunc, RoundingMode::Trunc>;
+using FunctionRound = FunctionRounding<NameRound, RoundingMode::Round, TieBreakingMode::Auto>;
+using FunctionRoundBankers = FunctionRounding<NameRoundBankers, RoundingMode::Round, TieBreakingMode::Bankers>;
+using FunctionFloor = FunctionRounding<NameFloor, RoundingMode::Floor, TieBreakingMode::Auto>;
+using FunctionCeil = FunctionRounding<NameCeil, RoundingMode::Ceil, TieBreakingMode::Auto>;
+using FunctionTrunc = FunctionRounding<NameTrunc, RoundingMode::Trunc, TieBreakingMode::Auto>;
 
 }

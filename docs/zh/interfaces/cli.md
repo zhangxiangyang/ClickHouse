@@ -63,9 +63,7 @@ cat file.csv | clickhouse-client --database=test --query="INSERT INTO test FORMA
 
 命令行客户端允许通过外部数据 （外部临时表） 来查询。更多相关信息，请参考 "[外部数据查询处理](../operations/table_engines/external_data.md)".
 
-<a name="interfaces_cli_configuration"></a>
-
-## 配置
+## 配置 {#interfaces_cli_configuration}
 
 您可以通过以下方式传入参数到 `clickhouse-client` 中 （所有的参数都有默认值）：
 
@@ -79,7 +77,7 @@ cat file.csv | clickhouse-client --database=test --query="INSERT INTO test FORMA
 
 ### 命令行参数
 
-- `--host, -h` -– 服务端的 host 名称, 默认是 'localhost'。  您可以选择使用 host 名称或者 IPv4 或 IPv6 地址。
+- `--host, -h` -– 服务端的 host 名称, 默认是 'localhost'。 您可以选择使用 host 名称或者 IPv4 或 IPv6 地址。
 - `--port` – 连接的端口，默认值： 9000。注意 HTTP 接口以及 TCP 原生接口是使用不同端口的。
 - `--user, -u` – 用户名。 默认值： default。
 - `--password` – 密码。 默认值： 空字符串。
@@ -91,13 +89,13 @@ cat file.csv | clickhouse-client --database=test --query="INSERT INTO test FORMA
 - `--vertical, -E` – 如果指定，默认情况下使用垂直格式输出结果。这与 '--format=Vertical' 相同。在这种格式中，每个值都在单独的行上打印，这种方式对显示宽表很有帮助。
 - `--time, -t` – 如果指定，非交互模式下会打印查询执行的时间到 'stderr' 中。
 - `--stacktrace` – 如果指定，如果出现异常，会打印堆栈跟踪信息。
-- `-config-file` – 配置文件的名称。
+- `--config-file` – 配置文件的名称。
 
 ### 配置文件
 
-`clickhouse-client`  使用一下第一个存在的文件：
+`clickhouse-client` 使用一下第一个存在的文件：
 
-- 通过 `-config-file` 参数指定的文件.
+- 通过 `--config-file` 参数指定的文件.
 - `./clickhouse-client.xml`
 - `\~/.clickhouse-client/config.xml`
 - `/etc/clickhouse-client/config.xml`

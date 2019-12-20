@@ -1,4 +1,5 @@
 #include <Client/MultiplexedConnections.h>
+#include <IO/ConnectionTimeouts.h>
 
 namespace DB
 {
@@ -50,9 +51,24 @@ MultiplexedConnections::MultiplexedConnections(
     active_connection_count = connections.size();
 }
 
+void MultiplexedConnections::sendScalarsData(Scalars & data)
+{
+    std::lock_guard lock(cancel_mutex);
+
+    if (!sent_query)
+        throw Exception("Cannot send scalars data: query not yet sent.", ErrorCodes::LOGICAL_ERROR);
+
+    for (ReplicaState & state : replica_states)
+    {
+        Connection * connection = state.connection;
+        if (connection != nullptr)
+            connection->sendScalarsData(data);
+    }
+}
+
 void MultiplexedConnections::sendExternalTablesData(std::vector<ExternalTablesData> & data)
 {
-    std::lock_guard<std::mutex> lock(cancel_mutex);
+    std::lock_guard lock(cancel_mutex);
 
     if (!sent_query)
         throw Exception("Cannot send external tables data: query not yet sent.", ErrorCodes::LOGICAL_ERROR);
@@ -73,13 +89,14 @@ void MultiplexedConnections::sendExternalTablesData(std::vector<ExternalTablesDa
 }
 
 void MultiplexedConnections::sendQuery(
+    const ConnectionTimeouts & timeouts,
     const String & query,
     const String & query_id,
     UInt64 stage,
     const ClientInfo * client_info,
     bool with_pending_data)
 {
-    std::lock_guard<std::mutex> lock(cancel_mutex);
+    std::lock_guard lock(cancel_mutex);
 
     if (sent_query)
         throw Exception("Query already sent.", ErrorCodes::LOGICAL_ERROR);
@@ -91,7 +108,7 @@ void MultiplexedConnections::sendQuery(
         if (!replica.connection)
             throw Exception("MultiplexedConnections: Internal error", ErrorCodes::LOGICAL_ERROR);
 
-        if (replica.connection->getServerRevision() < DBMS_MIN_REVISION_WITH_CURRENT_AGGREGATION_VARIANT_SELECTION_METHOD)
+        if (replica.connection->getServerRevision(timeouts) < DBMS_MIN_REVISION_WITH_CURRENT_AGGREGATION_VARIANT_SELECTION_METHOD)
         {
             /// Disable two-level aggregation due to version incompatibility.
             modified_settings.group_by_two_level_threshold = 0;
@@ -107,28 +124,30 @@ void MultiplexedConnections::sendQuery(
         for (size_t i = 0; i < num_replicas; ++i)
         {
             modified_settings.parallel_replica_offset = i;
-            replica_states[i].connection->sendQuery(query, query_id, stage, &modified_settings, client_info, with_pending_data);
+            replica_states[i].connection->sendQuery(timeouts, query, query_id,
+                                                    stage, &modified_settings, client_info, with_pending_data);
         }
     }
     else
     {
         /// Use single replica.
-        replica_states[0].connection->sendQuery(query, query_id, stage, &modified_settings, client_info, with_pending_data);
+        replica_states[0].connection->sendQuery(timeouts, query, query_id, stage,
+                                                &modified_settings, client_info, with_pending_data);
     }
 
     sent_query = true;
 }
 
-Connection::Packet MultiplexedConnections::receivePacket()
+Packet MultiplexedConnections::receivePacket()
 {
-    std::lock_guard<std::mutex> lock(cancel_mutex);
-    Connection::Packet packet = receivePacketUnlocked();
+    std::lock_guard lock(cancel_mutex);
+    Packet packet = receivePacketUnlocked();
     return packet;
 }
 
 void MultiplexedConnections::disconnect()
 {
-    std::lock_guard<std::mutex> lock(cancel_mutex);
+    std::lock_guard lock(cancel_mutex);
 
     for (ReplicaState & state : replica_states)
     {
@@ -143,7 +162,7 @@ void MultiplexedConnections::disconnect()
 
 void MultiplexedConnections::sendCancel()
 {
-    std::lock_guard<std::mutex> lock(cancel_mutex);
+    std::lock_guard lock(cancel_mutex);
 
     if (!sent_query || cancelled)
         throw Exception("Cannot cancel. Either no query sent or already cancelled.", ErrorCodes::LOGICAL_ERROR);
@@ -158,19 +177,19 @@ void MultiplexedConnections::sendCancel()
     cancelled = true;
 }
 
-Connection::Packet MultiplexedConnections::drain()
+Packet MultiplexedConnections::drain()
 {
-    std::lock_guard<std::mutex> lock(cancel_mutex);
+    std::lock_guard lock(cancel_mutex);
 
     if (!cancelled)
         throw Exception("Cannot drain connections: cancel first.", ErrorCodes::LOGICAL_ERROR);
 
-    Connection::Packet res;
+    Packet res;
     res.type = Protocol::Server::EndOfStream;
 
     while (hasActiveConnections())
     {
-        Connection::Packet packet = receivePacketUnlocked();
+        Packet packet = receivePacketUnlocked();
 
         switch (packet.type)
         {
@@ -195,7 +214,7 @@ Connection::Packet MultiplexedConnections::drain()
 
 std::string MultiplexedConnections::dumpAddresses() const
 {
-    std::lock_guard<std::mutex> lock(cancel_mutex);
+    std::lock_guard lock(cancel_mutex);
     return dumpAddressesUnlocked();
 }
 
@@ -216,7 +235,7 @@ std::string MultiplexedConnections::dumpAddressesUnlocked() const
     return os.str();
 }
 
-Connection::Packet MultiplexedConnections::receivePacketUnlocked()
+Packet MultiplexedConnections::receivePacketUnlocked()
 {
     if (!sent_query)
         throw Exception("Cannot receive packets: no query sent.", ErrorCodes::LOGICAL_ERROR);
@@ -228,7 +247,7 @@ Connection::Packet MultiplexedConnections::receivePacketUnlocked()
     if (current_connection == nullptr)
         throw Exception("Logical error: no available replica", ErrorCodes::NO_AVAILABLE_REPLICA);
 
-    Connection::Packet packet = current_connection->receivePacket();
+    Packet packet = current_connection->receivePacket();
 
     switch (packet.type)
     {
